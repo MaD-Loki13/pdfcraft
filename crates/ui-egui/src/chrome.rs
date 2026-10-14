@@ -270,22 +270,25 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         });
                         ui.add_space(window_controls::SIDE_GAP - 4.0);
                     }
-                    let (icon, label) = match app.theme_preference {
-                        ThemePreference::System => ("monitor", tl!("Use system setting")),
-                        ThemePreference::Light => ("sun", tl!("Light gray")),
-                        ThemePreference::Dark => ("moon", tl!("Dark gray")),
-                    };
-                    let tip = format!("{}: {label}", tl!("Display theme"));
-                    let response = icons::button(ui, icon, button, false, &tip);
-                    // A click cycles System, Light, Dark; a right-click opens the menu.
-                    if response.clicked() {
-                        app.execute(match app.theme_preference {
-                            ThemePreference::System => "view.theme.light",
-                            ThemePreference::Light => "view.theme.dark",
-                            ThemePreference::Dark => "view.theme.system",
-                        });
+                    // DoeringCraft: embedded in the Dashboard (`?host=parent`), the page sets the theme; no switch of its own.
+                    if app.host_save.is_none() {
+                        let (icon, label) = match app.theme_preference {
+                            ThemePreference::System => ("monitor", tl!("Use system setting")),
+                            ThemePreference::Light => ("sun", tl!("Light gray")),
+                            ThemePreference::Dark => ("moon", tl!("Dark gray")),
+                        };
+                        let tip = format!("{}: {label}", tl!("Display theme"));
+                        let response = icons::button(ui, icon, button, false, &tip);
+                        // A click cycles System, Light, Dark; a right-click opens the menu.
+                        if response.clicked() {
+                            app.execute(match app.theme_preference {
+                                ThemePreference::System => "view.theme.light",
+                                ThemePreference::Light => "view.theme.dark",
+                                ThemePreference::Dark => "view.theme.system",
+                            });
+                        }
+                        egui::Popup::context_menu(&response).id(response.id.with("theme_menu")).show(|ui| appearance_menu(app, ui));
                     }
-                    egui::Popup::context_menu(&response).id(response.id.with("theme_menu")).show(|ui| appearance_menu(app, ui));
                     if icons::button(ui, "circle-help", button, false, tl!("Keyboard shortcuts")).clicked() {
                         app.dialog = Some(Dialog::Shortcuts);
                     }
