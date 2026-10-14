@@ -389,7 +389,8 @@ fn first_supported(list: &str) -> Option<Lang> {
 
 #[cfg(target_arch = "wasm32")]
 fn detect_system_lang() -> Lang {
-    Lang::EN
+    // DoeringCraft: follow the browser language (`navigator.language`), English when unknown.
+    web_sys::window().and_then(|w| w.navigator().language()).and_then(|tag| lang_from_tag(&tag)).unwrap_or(Lang::EN)
 }
 
 thread_local! {
