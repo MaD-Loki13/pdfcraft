@@ -262,6 +262,12 @@ impl Lang {
     /// Resolve the `language` preference: a language code, or [`AUTO`] (and anything unknown,
     /// e.g. a code from a newer version) to follow the system locale.
     pub fn from_pref(pref: &str) -> Lang {
+        // DoeringCraft: the web build always shows German, whatever the browser or a saved setting says.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(de) = Lang::from_code("de") {
+            let _ = pref;
+            return de;
+        }
         Lang::from_code(pref).unwrap_or_else(system_lang)
     }
 

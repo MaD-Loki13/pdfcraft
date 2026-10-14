@@ -2355,3 +2355,265 @@ animation effects	Off	Aus
 	This document is trying to open a local file:	Dieses Dokument versucht, eine lokale Datei zu öffnen:
 	Move tag earlier	Tag früher verschieben
 	Move tag later	Tag später verschieben
+# DoeringCraft: entries the German catalog lacked (written for the Doering Dashboard, 14.10.2026).
+calendar date	January	Januar
+calendar date	February	Februar
+calendar date	March	März
+calendar date	April	April
+calendar date	May	Mai
+calendar date	June	Juni
+calendar date	July	Juli
+calendar date	August	August
+calendar date	September	September
+calendar date	October	Oktober
+calendar date	November	November
+calendar date	December	Dezember
+	Certificate authority	Zertifizierungsstelle
+	End entity	Endteilnehmer
+	Text recognition isn't installed: its models are missing (run `cargo xtask models`, or set PDFCRAFT_MODELS).	Die Texterkennung ist nicht installiert: Ihre Modelle fehlen.
+	Save (M4)	Speichern (M4)
+	Only the document's owner can change its security (open it with the permissions password)	Nur der Besitzer des Dokuments kann die Sicherheit ändern (mit dem Berechtigungskennwort öffnen)
+	Creator	Ersteller
+	Producer	Erzeugt mit
+	Enter a name.	Gib einen Namen ein.
+	The password must have at least 6 characters.	Das Kennwort muss mindestens 6 Zeichen lang sein.
+	The passwords do not match.	Die Kennwörter stimmen nicht überein.
+	There is no folder to save the digital ID in.	Es gibt keinen Ordner, in dem die digitale ID gespeichert werden kann.
+	The password is incorrect.	Das Kennwort ist falsch.
+	Choose a digital ID.	Wähle eine digitale ID.
+	Unsigned signature field: {name}	Nicht unterschriebenes Unterschriftsfeld: {name}
+	Rev. {rev}: Signed by {name}	Rev. {rev}: Unterschrieben von {name}
+	Rev. {rev}: Signed by an unknown signer	Rev. {rev}: Unterschrieben von unbekannter Person
+	Rev. {rev}: Certified by {name}	Rev. {rev}: Zertifiziert von {name}
+	Rev. {rev}: Certified by an unknown signer	Rev. {rev}: Zertifiziert von unbekannter Person
+	{who}, certificate issued by {issuer}.	{who}, Zertifikat ausgestellt von {issuer}.
+	{who}, certificate issued by an unknown issuer.	{who}, Zertifikat von unbekanntem Aussteller.
+	Non-Repudiation	Nichtabstreitbarkeit
+	Key Encipherment	Schlüsselverschlüsselung
+	Data Encipherment	Datenverschlüsselung
+	Key Agreement	Schlüsselvereinbarung
+	Certificate Signing	Zertifikatsignatur
+	CRL Signing	CRL-Signatur
+	Encipher Only	Nur verschlüsseln
+	Decipher Only	Nur entschlüsseln
+	Enter a page number	Seitenzahl eingeben
+	Enter a URL	URL eingeben
+	Enter the field names	Feldnamen eingeben
+	Cut and stack needs Two-sided: Off. Print single-sided sheets.	Schneiden und Stapeln braucht „Beidseitig: Aus“. Drucke einseitige Blätter.
+	Panel layout could not be restored: {error}	Die Anordnung der Bereiche konnte nicht wiederhergestellt werden: {error}
+	Panel move was not applied: {error}	Das Verschieben des Bereichs wurde nicht übernommen: {error}
+	Rendering…	Wird dargestellt…
+	Still rendering — this page is unusually complex…	Wird noch dargestellt – diese Seite ist ungewöhnlich aufwendig…
+	English	Englisch
+@plural	{n} image optimized|{n} images optimized	{n} Bild optimiert|{n} Bilder optimiert
+@plural	{n} item discarded|{n} items discarded	{n} Element verworfen|{n} Elemente verworfen
+@plural	{n} byte|{n} bytes	{n} Byte|{n} Byte
+@plural	{n} pixel|{n} pixels	{n} Pixel|{n} Pixel
+@plural	Delete {n} field|Delete {n} fields	{n} Feld löschen|{n} Felder löschen
+	 on page {label}	 auf Seite {label}
+	Drop PDFs or folders here, or choose them.	PDFs oder Ordner hier ablegen oder auswählen.
+	Every PDF in the folder	Alle PDFs im Ordner
+	Every PDF in the folder and the folders inside it	Alle PDFs im Ordner und in seinen Unterordnern
+	No PDFs found in {folder}	Keine PDFs in {folder} gefunden
+	Added the first {n} PDFs in {folder}	Die ersten {n} PDFs aus {folder} hinzugefügt
+	Add the PDFs to combine	PDFs zum Zusammenführen hinzufügen
+	Document properties (⌘D)	Dokumenteigenschaften (Strg+D)
+	New bookmark (⌘B)	Neues Lesezeichen (Strg+B)
+	Next (⌘G)	Weiter (Strg+G)
+	Open a PDF (⌘O)	PDF öffnen (Strg+O)
+	Previous (⇧⌘G)	Zurück (Umschalt+Strg+G)
+	Print (⌘P)	Drucken (Strg+P)
+	Rotate view clockwise (⇧⌘+)	Ansicht im Uhrzeigersinn drehen (Umschalt+Strg++)
+	Zoom in (⌘+)	Vergrößern (Strg++)
+	Zoom in / out (also pinch or ⌘-scroll)	Vergrößern/Verkleinern (auch mit zwei Fingern oder Strg+Mausrad)
+	Zoom out (⌘−)	Verkleinern (Strg+−)
+	DeviceCMYK is used, but the PDF/A output intent isn't a CMYK profile	DeviceCMYK wird verwendet, aber die PDF/A-Ausgabebedingung ist kein CMYK-Profil
+	DeviceRGB is used, but the PDF/A output intent isn't an RGB profile	DeviceRGB wird verwendet, aber die PDF/A-Ausgabebedingung ist kein RGB-Profil
+	Flatten Fill & Sign	Ausfüllen und Unterschreiben reduzieren
+	The security settings don't allow screen readers to read the text	Die Sicherheitseinstellungen erlauben Bildschirmlesern nicht, den Text zu lesen
+	No page has text: the document appears to be images of pages	Keine Seite enthält Text: Das Dokument scheint aus Seitenbildern zu bestehen
+	The document has no tags (structure tree)	Das Dokument hat keine Tags (Strukturbaum)
+	The document isn't marked as tagged (MarkInfo Marked)	Das Dokument ist nicht als getaggt gekennzeichnet (MarkInfo Marked)
+	No document language is set	Es ist keine Dokumentsprache festgelegt
+	The document has no title	Das Dokument hat keinen Titel
+	The window shows the file name, not the title (Initial View > Show)	Das Fenster zeigt den Dateinamen statt des Titels (Ansicht beim Öffnen > Anzeigen)
+	{n} pages and no bookmarks	{n} Seiten und keine Lesezeichen
+	The document isn't tagged, so none of its content is	Das Dokument ist nicht getaggt, daher ist keiner seiner Inhalte getaggt
+	Page {p}: {n} untagged content item	Seite {p}: {n} nicht getaggtes Inhaltselement
+	Page {p}: {n} untagged content items	Seite {p}: {n} nicht getaggte Inhaltselemente
+	Form field on page {p} isn't tagged	Formularfeld auf Seite {p} ist nicht getaggt
+	{} annotation on page {p} isn't tagged	{}-Anmerkung auf Seite {p} ist nicht getaggt
+	Page {p} doesn't tab in structure order	Seite {p} folgt beim Tabulator nicht der Strukturreihenfolge
+	Font {} on page {p} doesn't map its characters to Unicode	Schrift {} auf Seite {p} ordnet ihre Zeichen nicht Unicode zu
+	Font (unnamed) on page {p} doesn't map its characters to Unicode	Schrift (ohne Namen) auf Seite {p} ordnet ihre Zeichen nicht Unicode zu
+	Field "{}" on page {p} has no description (tooltip)	Feld „{}“ auf Seite {p} hat keine Beschreibung (QuickInfo)
+	{ty} element: {what}	{ty}-Element: {what}
+	{ty} element on page {p}: {what}	{ty}-Element auf Seite {p}: {what}
+	no alternate text	kein Alternativtext
+	its alternate text is inside another element's and will never be read	sein Alternativtext liegt in dem eines anderen Elements und wird nie vorgelesen
+	alternate text on an element with no page content	Alternativtext an einem Element ohne Seiteninhalt
+	alternate text hides an annotation inside it	Alternativtext verdeckt eine Anmerkung darin
+	not in a Table, THead, TBody or TFoot	nicht in Table, THead, TBody oder TFoot
+	not in a TR	nicht in einem TR
+	no header cells (TH)	keine Kopfzellen (TH)
+	rows have between {min} and {max} columns	Zeilen haben zwischen {min} und {max} Spalten
+	no summary	keine Zusammenfassung
+	not in an L (list)	nicht in einem L (Liste)
+	not in an LI (list item)	nicht in einem LI (Listenelement)
+	the first heading is an H{n}; headings should not skip levels	die erste Überschrift ist H{n}; Überschriften sollten keine Ebene überspringen
+	H{n} follows an H{d}; headings should not skip levels	H{n} folgt auf H{d}; Überschriften sollten keine Ebene überspringen
+	… and {n} more	… und {n} weitere
+	Accessibility Report	Bericht zur Barrierefreiheit
+	Filename	Dateiname
+	Report created	Bericht erstellt
+	The checker found problems which may prevent the document from being fully accessible.	Die Prüfung hat Probleme gefunden, die eine vollständige Barrierefreiheit des Dokuments verhindern können.
+	Detailed Report	Ausführlicher Bericht
+	Rule Name	Regel
+	The metadata doesn't identify the file as {}	Die Metadaten kennzeichnen die Datei nicht als {}
+	Page {} has additional actions	Seite {} hat zusätzliche Aktionen
+	A {} action isn't allowed	Eine {}-Aktion ist nicht erlaubt
+	{} annotations aren't allowed	{}-Anmerkungen sind nicht erlaubt
+	A {} annotation isn't set to print, or is hidden	Eine {}-Anmerkung ist nicht zum Drucken eingestellt oder ausgeblendet
+	A {} annotation has no appearance stream	Eine {}-Anmerkung hat keinen Erscheinungsbild-Datenstrom
+	A {} annotation has additional actions	Eine {}-Anmerkung hat zusätzliche Aktionen
+	The font {} isn't embedded	Die Schrift {} ist nicht eingebettet
+	A font isn't embedded	Eine Schrift ist nicht eingebettet
+	The signature has no valid byte range.	Die Unterschrift hat keinen gültigen Bytebereich.
+	The signature's byte range does not match the file.	Der Bytebereich der Unterschrift passt nicht zur Datei.
+	The signature's byte range does not exclude exactly its contents.	Der Bytebereich der Unterschrift schließt nicht genau ihren Inhalt aus.
+	The signature contents are not hexadecimal.	Der Inhalt der Unterschrift ist nicht hexadezimal.
+	The signature could not be read ({}).	Die Unterschrift konnte nicht gelesen werden ({}).
+	PdfCraft can't check this signature yet: {}.	DoeringCraft kann diese Unterschrift noch nicht prüfen: {}.
+	The signature uses the legacy adbe.x509.rsa_sha1 format.	Die Unterschrift nutzt das veraltete Format adbe.x509.rsa_sha1.
+	The signature is BER-encoded (indefinite lengths) rather than DER; it was read leniently.	Die Unterschrift ist BER-kodiert (unbestimmte Längen) statt DER; sie wurde nachsichtig gelesen.
+	The signed content is a constructed (segmented) OCTET STRING, as BER allows; it was read anyway.	Der unterschriebene Inhalt ist ein zusammengesetzter (segmentierter) OCTET STRING, wie BER ihn erlaubt; er wurde trotzdem gelesen.
+	The RSA signature value does not have the length of the key's modulus (leading zero bytes dropped or added); it was read anyway.	Der RSA-Signaturwert hat nicht die Länge des Schlüsselmoduls (führende Nullbytes entfernt oder ergänzt); er wurde trotzdem gelesen.
+	The RSA signature's DigestInfo has no NULL parameter (older signers write it so); it was read anyway.	DigestInfo der RSA-Signatur hat keinen NULL-Parameter (ältere Programme schreiben es so); sie wurde trotzdem gelesen.
+	The ECDSA signature is not in canonical DER (trailing bytes, padding or a missing sign byte); it was read anyway.	Die ECDSA-Signatur ist nicht in kanonischem DER (überzählige Bytes, Auffüllung oder fehlendes Vorzeichenbyte); sie wurde trotzdem gelesen.
+	The ECDSA signature is the raw r and s values instead of a DER sequence; it was read anyway.	Die ECDSA-Signatur besteht aus den rohen Werten r und s statt einer DER-Folge; sie wurde trotzdem gelesen.
+	The signature algorithm and the SignerInfo's digest algorithm name different hashes; the signature was made with the SignerInfo's.	Signaturalgorithmus und Hash-Algorithmus der SignerInfo nennen verschiedene Hashverfahren; unterschrieben wurde mit dem der SignerInfo.
+	This signature uses SHA-1, a weak hash algorithm: collisions in it have been demonstrated. It still validates because many documents signed years ago use it, but it should not be relied on.	Diese Unterschrift nutzt SHA-1, ein schwaches Hashverfahren, für das Kollisionen nachgewiesen sind. Sie gilt weiter als gültig, weil viele ältere Dokumente es nutzen, ist aber nicht verlässlich.
+	This signature uses RIPEMD-160, a legacy 160-bit hash algorithm that is no longer recommended for signatures. It still validates, but it should not be relied on.	Diese Unterschrift nutzt RIPEMD-160, ein veraltetes 160-Bit-Hashverfahren, das für Unterschriften nicht mehr empfohlen wird. Sie gilt weiter als gültig, ist aber nicht verlässlich.
+	The document has been altered or corrupted since the signature was applied.	Das Dokument wurde seit dem Unterschreiben verändert oder beschädigt.
+	The signer's certificate is not in the signature.	Das Zertifikat der unterschreibenden Person ist nicht in der Unterschrift enthalten.
+	The signature value does not match the signer's certificate: the signature is corrupt.	Der Signaturwert passt nicht zum Zertifikat der unterschreibenden Person: Die Unterschrift ist beschädigt.
+	The signature could not be checked ({}).	Die Unterschrift konnte nicht geprüft werden ({}).
+	The signature could not be verified ({}).	Die Unterschrift konnte nicht bestätigt werden ({}).
+	This document has not been modified since this signature was applied.	Das Dokument wurde seit dieser Unterschrift nicht verändert.
+	The document has been modified since this signature was applied, but the changes are permitted ({}).	Das Dokument wurde seit dieser Unterschrift verändert, die Änderungen sind aber erlaubt ({}).
+	The document has been altered since this signature was applied in ways it does not permit ({}).	Das Dokument wurde seit dieser Unterschrift auf nicht erlaubte Weise verändert ({}).
+	The signer's certificate was not valid at the time of signing.	Das Zertifikat der unterschreibenden Person war zum Zeitpunkt der Unterschrift nicht gültig.
+	The signer's certificate does not allow digital signatures (its key usage has neither digital signature nor non-repudiation).	Das Zertifikat der unterschreibenden Person erlaubt keine digitalen Unterschriften (die Schlüsselverwendung enthält weder digitale Signatur noch Nichtabstreitbarkeit).
+	The signer's certificate is not issued for signing documents (its extended key usage has no document-signing purpose).	Das Zertifikat der unterschreibenden Person ist nicht zum Unterschreiben von Dokumenten ausgestellt (die erweiterte Schlüsselverwendung enthält diesen Zweck nicht).
+	The signer's certificate has critical extensions PdfCraft does not recognize ({}).	Das Zertifikat der unterschreibenden Person hat kritische Erweiterungen, die DoeringCraft nicht kennt ({}).
+	The certificate of {} is not a CA certificate that may issue certificates, so it is not used to vouch for {}.	Das Zertifikat von {} ist kein CA-Zertifikat, das Zertifikate ausstellen darf; es bürgt daher nicht für {}.
+	The certificate of {} does not allow this many CA certificates below it (path length), so it is not used to vouch for {}.	Das Zertifikat von {} erlaubt nicht so viele CA-Zertifikate unter sich (Pfadlänge); es bürgt daher nicht für {}.
+	The certificate of {} was not valid at the time of signing, so it is not used to vouch for {}.	Das Zertifikat von {} war zum Zeitpunkt der Unterschrift nicht gültig; es bürgt daher nicht für {}.
+	The signer's identity is unknown because it has not been included in your list of trusted certificates and none of its parent certificates are trusted certificates.	Die Identität der unterschreibenden Person ist unbekannt, weil sie nicht in deiner Liste vertrauenswürdiger Zertifikate steht und keines der übergeordneten Zertifikate vertrauenswürdig ist.
+	The signer's identity is valid.	Die Identität der unterschreibenden Person ist gültig.
+	The signature includes an embedded timestamp.	Die Unterschrift enthält einen eingebetteten Zeitstempel.
+	Signing time is from the clock on the signer's computer.	Die Unterschriftszeit stammt von der Uhr des unterschreibenden Computers.
+	The signature's timestamp token does not cover the signature value.	Das Zeitstempel-Token der Unterschrift deckt den Signaturwert nicht ab.
+	The signature's timestamp token could not be verified ({}).	Das Zeitstempel-Token der Unterschrift konnte nicht bestätigt werden ({}).
+	The embedded timestamp token is valid and its authority is trusted; trusted time is {}.	Das eingebettete Zeitstempel-Token ist gültig und seine Stelle vertrauenswürdig; vertrauenswürdige Zeit ist {}.
+	The signature carries an unverified timestamp ({}): the timestamp authority is not in your list of trusted certificates, so the signing time claimed by the signer is used instead.	Die Unterschrift trägt einen unbestätigten Zeitstempel ({}): Die Zeitstempelstelle steht nicht in deiner Liste vertrauenswürdiger Zertifikate, daher gilt die angegebene Unterschriftszeit.
+	The signer's certificate has been revoked ({}).	Das Zertifikat der unterschreibenden Person wurde widerrufen ({}).
+	The document's embedded revocation information shows that the signer's certificate has not been revoked.	Die im Dokument eingebetteten Sperrinformationen zeigen, dass das Zertifikat der unterschreibenden Person nicht widerrufen wurde.
+	The timestamp has no valid byte range.	Der Zeitstempel hat keinen gültigen Bytebereich.
+	The timestamp's byte range does not match the file.	Der Bytebereich des Zeitstempels passt nicht zur Datei.
+	The timestamp's byte range does not exclude exactly its contents.	Der Bytebereich des Zeitstempels schließt nicht genau seinen Inhalt aus.
+	The timestamp contents are not hexadecimal.	Der Inhalt des Zeitstempels ist nicht hexadezimal.
+	The timestamp token could not be read ({}).	Das Zeitstempel-Token konnte nicht gelesen werden ({}).
+	The document has been altered or corrupted since the timestamp was applied.	Das Dokument wurde seit dem Zeitstempel verändert oder beschädigt.
+	The timestamp authority's certificate was not valid at the time of timestamping.	Das Zertifikat der Zeitstempelstelle war zum Zeitpunkt des Zeitstempels nicht gültig.
+	This document has not been modified since this timestamp was applied.	Das Dokument wurde seit diesem Zeitstempel nicht verändert.
+	The document has been modified since this timestamp was applied, but the changes are permitted ({}).	Das Dokument wurde seit diesem Zeitstempel verändert, die Änderungen sind aber erlaubt ({}).
+	The document has been altered since this timestamp was applied in ways it does not permit ({}).	Das Dokument wurde seit diesem Zeitstempel auf nicht erlaubte Weise verändert ({}).
+	The timestamp token is valid and its authority is trusted.	Das Zeitstempel-Token ist gültig und seine Stelle vertrauenswürdig.
+	The timestamp token is valid, but the timestamp authority is not in your list of trusted certificates.	Das Zeitstempel-Token ist gültig, aber die Zeitstempelstelle steht nicht in deiner Liste vertrauenswürdiger Zertifikate.
+	Unsigned signature field	Nicht unterschriebenes Unterschriftsfeld
+	Signature is valid	Unterschrift ist gültig
+	Signature validity is unknown	Gültigkeit der Unterschrift ist unbekannt
+	Signature is invalid	Unterschrift ist ungültig
+	form fill	Formular ausfüllen
+	document security store	Dokument-Sicherheitsspeicher
+	links	Links
+	document structure	Dokumentstruktur
+	pages added or removed	Seiten hinzugefügt oder entfernt
+	other changes	andere Änderungen
+	the signed version could not be read	die unterschriebene Fassung konnte nicht gelesen werden
+	page {n} is out of range (1–{count})	Seite {n} liegt außerhalb des Bereichs (1–{count})
+	{page} is not a page number or label	{page} ist keine Seitenzahl oder Seitenbeschriftung
+	Change Title	Titel ändern
+	Change Author	Autor ändern
+	Change Subject	Thema ändern
+	Change Keywords	Stichwörter ändern
+	Save as {level}	Als {level} speichern
+	Create links	Links erstellen
+	Paste	Einfügen
+	Next	Weiter
+	Previous	Zurück
+	Choose…	Auswählen…
+	Refresh	Aktualisieren
+	Loading…	Wird geladen…
+	Save changes?	Änderungen speichern?
+	Page {n}	Seite {n}
+	of	von
+	Comment	Kommentar
+	Font	Schrift
+	Color	Farbe
+	Theme	Farbschema
+	System	System
+	Save file	Datei speichern
+	Import	Importieren
+	Help…	Hilfe…
+	Automatically	Automatisch
+	Never	Nie
+	Always	Immer
+	On	An
+	Enabled	Aktiviert
+	Disabled	Deaktiviert
+	Error	Fehler
+	Warning	Warnung
+	Information	Information
+	Success	Erfolgreich
+	Folder	Ordner
+	Choose a file…	Datei auswählen…
+	Choose a folder…	Ordner auswählen…
+	Open folder	Ordner öffnen
+	Create folder	Ordner erstellen
+	Duplicate	Duplizieren
+	Move	Verschieben
+	Copy to clipboard	In die Zwischenablage kopieren
+	Copied to clipboard	In die Zwischenablage kopiert
+	Organize	Organisieren
+	Comment and review	Kommentieren und prüfen
+	Search results	Suchergebnisse
+	No results	Keine Ergebnisse
+	Page {n} of {total}	Seite {n} von {total}
+calendar weekday	Su	So
+calendar weekday	Mo	Mo
+calendar weekday	Tu	Di
+calendar weekday	We	Mi
+calendar weekday	Th	Do
+calendar weekday	Fr	Fr
+calendar weekday	Sa	Sa
+certificate	Issued to	Ausgestellt für
+certificate	Issued by	Ausgestellt von
+certificate	Valid from	Gültig ab
+certificate	Valid to	Gültig bis
+certificate	Intended usage	Vorgesehene Verwendung
+certificate	Version	Version
+certificate	Serial number	Seriennummer
+certificate	Issuer	Aussteller
+certificate	Validity starts	Gültigkeit beginnt
+certificate	Validity ends	Gültigkeit endet
+certificate	Public key	Öffentlicher Schlüssel
+certificate	Basic constraints	Basiseinschränkungen
+certificate	Key usage	Schlüsselverwendung
+certificate	Self-signed	Selbst signiert
+certificate	SHA-1 digest	SHA-1-Fingerabdruck
+certificate	SHA-256 digest	SHA-256-Fingerabdruck
+@plural	{n} file|{n} files	{n} Datei|{n} Dateien
+@plural	{n} comment|{n} comments	{n} Kommentar|{n} Kommentare
+@plural	{n} result|{n} results	{n} Ergebnis|{n} Ergebnisse
