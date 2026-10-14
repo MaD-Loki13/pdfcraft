@@ -66,6 +66,12 @@ fn main() {
                         {
                             app.comment_prefs.author = author.chars().take(200).collect();
                         }
+                        // DoeringCraft: `?theme=hell|dunkel` (or light|dark) pins the theme to the host page's.
+                        match query_param("theme").as_deref() {
+                            Some("dunkel" | "dark") => app.set_theme_preference(pdfcraft_ui_egui::theme::ThemePreference::Dark),
+                            Some("hell" | "light") => app.set_theme_preference(pdfcraft_ui_egui::theme::ThemePreference::Light),
+                            _ => {}
+                        }
                         bridge.listen(app.startup_inbox.clone(), cc.egui_ctx.clone());
                         app.host_save = Some(bridge.save_fn());
                         app.host_dirty = Some(bridge.dirty_fn());
