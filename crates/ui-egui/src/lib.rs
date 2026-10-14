@@ -602,6 +602,8 @@ pub struct PdfCraftApp {
     pub host_save: Option<HostSaveFn>,
     /// Reports unsaved work to the embedding page (web, see [`HostDirtyFn`]).
     pub host_dirty: Option<HostDirtyFn>,
+    /// DoeringCraft: the embedding page asked to save (`pdfcraft:save-request`); polled every frame.
+    pub host_save_request: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// A pending "save changes?" question (closing a dirty tab or quitting).
     pub close_request: Option<CloseRequest>,
     /// Save to this path instead of asking (tests and automation).
@@ -935,6 +937,7 @@ impl PdfCraftApp {
             os_events: None,
             host_save: None,
             host_dirty: None,
+            host_save_request: None,
             close_request: None,
             save_override: None,
             props_draft: None,
@@ -2882,6 +2885,10 @@ impl eframe::App for PdfCraftApp {
             if let Some(report) = self.host_dirty.as_mut() {
                 report(dirty);
             }
+        }
+        // DoeringCraft: the embedding page's own Save button saves the active document.
+        if self.host_save_request.as_ref().is_some_and(|f| f.swap(false, std::sync::atomic::Ordering::Relaxed)) {
+            self.execute("file.save");
         }
         self.poll_updates();
         self.poll_print();

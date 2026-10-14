@@ -72,7 +72,9 @@ fn main() {
                             Some("hell" | "light") => app.set_theme_preference(pdfcraft_ui_egui::theme::ThemePreference::Light),
                             _ => {}
                         }
-                        bridge.listen(app.startup_inbox.clone(), cc.egui_ctx.clone());
+                        let save_request = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        app.host_save_request = Some(save_request.clone());
+                        bridge.listen(app.startup_inbox.clone(), cc.egui_ctx.clone(), save_request);
                         app.host_save = Some(bridge.save_fn());
                         app.host_dirty = Some(bridge.dirty_fn());
                         bridge.post_ready();
@@ -181,8 +183,9 @@ mod host {
             }
         }
 
-        /// Hear `pdfcraft:open` from the parent and queue the file like a `?file=` download.
-        pub fn listen(&self, inbox: pdfcraft_ui_egui::Inbox, ctx: egui::Context) {
+        /// Hear `pdfcraft:open` from the parent and queue the file like a `?file=` download;
+        /// `pdfcraft:save-request` (DoeringCraft) asks the app to save the active document.
+        pub fn listen(&self, inbox: pdfcraft_ui_egui::Inbox, ctx: egui::Context, save_request: std::sync::Arc<std::sync::atomic::AtomicBool>) {
             let parent = self.parent.clone();
             let origin = self.origin.clone();
             let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
@@ -190,7 +193,13 @@ mod host {
                     return;
                 }
                 let data = event.data();
-                if string(&data, "type").as_deref() != Some("pdfcraft:open") {
+                let kind = string(&data, "type");
+                if kind.as_deref() == Some("pdfcraft:save-request") {
+                    save_request.store(true, std::sync::atomic::Ordering::Relaxed);
+                    ctx.request_repaint();
+                    return;
+                }
+                if kind.as_deref() != Some("pdfcraft:open") {
                     return;
                 }
                 let name = string(&data, "name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "document.pdf".to_string());
