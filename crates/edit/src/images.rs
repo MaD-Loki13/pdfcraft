@@ -372,6 +372,10 @@ pub fn reading_images(doc: &Document, page: usize) -> Result<Vec<PageImage>, Edi
 pub enum ImageChange {
     /// Apply a user-space transform after its placement (move, resize, rotate, flip).
     Transform([f64; 6]),
+    /// Show only this part of it (a box in user space): a clipping path around the drawing,
+    /// inside its own scope so a later move or resize carries it along. The pixels stay where
+    /// they are; nothing is scaled.
+    Crop([f64; 4]),
     /// Draw this image XObject instead, in the same place.
     Replace(ObjRef),
     Delete,
@@ -420,6 +424,19 @@ fn exclusive_clip(ops: &[Op], op: usize) -> Option<(usize, Matrix)> {
     Some((at, Matrix(ops.get(at + 3)?.nums::<6>()?)))
 }
 
+/// The `q cm … Q` whose only content after its `cm` is `start..=end` (a `Do`, or a balanced
+/// `q … Q` scope), with the index and value of that `cm`. Another transform of the same
+/// placement is folded into it, so repeated moves and resizes don't nest one more `q` each.
+fn enclosing_transform(ops: &[Op], start: usize, end: usize) -> Option<(usize, Matrix)> {
+    let at = start.checked_sub(1)?;
+    let cm = ops.get(at)?;
+    if !ops.get(at.checked_sub(1)?)?.is("q") || !ops.get(end.checked_add(1)?)?.is("Q") || !cm.is("cm") || cm.operands.len() != 6 {
+        return None;
+    }
+    let m = Matrix(cm.nums::<6>()?);
+    m.0.iter().all(|v| v.is_finite()).then_some((at, m))
+}
+
 /// The `cm` to put before the clip so that user-space transform `t` also moves the clip:
 /// the clip is drawn in the CTM before the image's own `cm` (`cm` · that = `draw`).
 fn clip_matrix(draw: Matrix, cm: Matrix, t: Matrix) -> Option<Matrix> {
@@ -443,6 +460,9 @@ pub fn change_image(doc: &mut Document, page: usize, index: usize, change: &Imag
         ImageChange::Delete => Vec::new(),
         ImageChange::Transform(t) => {
             return transform_image(doc, &p, &all, &img, *t);
+        }
+        ImageChange::Crop(keep) => {
+            return crop_image(doc, &p, &all, &img, *keep);
         }
         ImageChange::Replace(r) => {
             if img.is_form {
@@ -603,6 +623,20 @@ fn transform_image(
     if !local.0.iter().all(|v| v.is_finite() && v.abs() <= 1e12) {
         return Err(EditError::Invalid("the image transform is too large".into()));
     }
+    // Already alone in a `q cm … Q` (its own placement, or the wrapper an earlier edit added):
+    // change that `cm` in place. The CTM inside is `local · cm · outer` either way.
+    if let Some((at, cm)) = enclosing_transform(&ops, start, end) {
+        let folded = local.then(&cm);
+        if !folded.0.iter().all(|v| v.is_finite() && v.abs() <= 1e12) {
+            return Err(EditError::Invalid("the image transform is too large".into()));
+        }
+        let changed = crate::text::splice(&pieces, &ops, |index| {
+            if index == at { (vec![Op::new("cm", folded.0.map(Object::Real).to_vec())], false) } else { (Vec::new(), true) }
+        });
+        let contents = crate::text::rewritten_contents(doc, streams, changed);
+        doc.update_dict(page.obj, |d| d.set(b"Contents".to_vec(), contents))?;
+        return Ok(());
+    }
     let changed = crate::text::splice(&pieces, &ops, |index| {
         if index == start {
             let mut out = vec![Op::new("q", vec![]), Op::new("cm", local.0.map(Object::Real).to_vec())];
@@ -616,6 +650,86 @@ fn transform_image(
             let mut out: Vec<_> = ops.get(index).cloned().into_iter().collect();
             out.push(Op::new("Q", vec![]));
             (out, false)
+        } else {
+            (Vec::new(), true)
+        }
+    });
+    let contents = crate::text::rewritten_contents(doc, streams, changed);
+    doc.update_dict(page.obj, |d| d.set(b"Contents".to_vec(), contents))?;
+    Ok(())
+}
+
+/// Crop: clip the image's drawing to `keep` (user space). The clip goes just inside the scope
+/// that holds the image and its private crop (or a new `q … Q` around the `Do`), written in
+/// that scope's coordinates as the box's four corners, so a turned image crops to an upright
+/// box too and a later transform of the scope moves the crop with the pixels.
+fn crop_image(
+    doc: &mut Document,
+    page: &pdfcraft_model::Page,
+    streams: &[(Object, Vec<u8>)],
+    image: &PageImage,
+    keep: [f64; 4],
+) -> Result<(), EditError> {
+    if !keep.iter().all(|v| v.is_finite() && v.abs() <= 1e12) {
+        return Err(EditError::Invalid("the crop box must be finite and no larger than 1e12".into()));
+    }
+    let [x0, y0, x1, y1] = [keep[0].min(keep[2]), keep[1].min(keep[3]), keep[0].max(keep[2]), keep[1].max(keep[3])];
+    if x1 - x0 < 1e-6 || y1 - y0 < 1e-6 {
+        return Err(EditError::Invalid("the crop box has no area".into()));
+    }
+    let mut offset = 0_usize;
+    for (_, data) in streams.iter().take(image.stream) {
+        offset = offset
+            .checked_add(data.len())
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| EditError::Invalid("the image content is too large".into()))?;
+    }
+    let data = streams.get(image.stream).ok_or_else(|| EditError::Invalid("the image stream is missing".into()))?;
+    let op = parse(&data.1).ops.get(image.op).cloned().ok_or_else(|| EditError::Invalid("the image operation is missing".into()))?;
+    let span = offset.checked_add(op.span.start).ok_or_else(|| EditError::Invalid("the image content is too large".into()))?;
+    let pieces = pdfcraft_content::Pieces::join(&streams.iter().map(|(_, data)| data.as_slice()).collect::<Vec<_>>());
+    let ops = pieces.parse().ops;
+    let target = ops
+        .iter()
+        .position(|op| op.span.start == span && op.is("Do"))
+        .ok_or_else(|| EditError::Invalid("the image operation could not be located".into()))?;
+    let (start, end, placement) = image_transform_scope(&ops, target)?.unwrap_or((target, target, Matrix(image.draw_matrix)));
+    let inverse = placement.invert().ok_or_else(|| EditError::Invalid("the image has no area".into()))?;
+    let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| inverse.apply(x, y));
+    if !corners.iter().all(|(x, y)| x.is_finite() && y.is_finite() && x.abs() <= 1e12 && y.abs() <= 1e12) {
+        return Err(EditError::Invalid("the crop box is too large for the image's placement".into()));
+    }
+    let clip: Vec<Op> = corners
+        .iter()
+        .enumerate()
+        .map(|(i, (x, y))| Op::new(if i == 0 { "m" } else { "l" }, vec![Object::Real(*x), Object::Real(*y)]))
+        .chain([Op::new("h", vec![]), Op::new("W", vec![]), Op::new("n", vec![])])
+        .collect();
+    // The image's own earlier crop (a clipping path right after the scope's `q`) gives way to
+    // the new one, so a crop can grow again as well as shrink.
+    let old_clip: Option<std::ops::Range<usize>> = (start != end)
+        .then(|| {
+            let mut k = start + 1;
+            while ops.get(k).is_some_and(|o| matches!(o.op.as_slice(), b"m" | b"l" | b"c" | b"v" | b"y" | b"h" | b"re")) {
+                k += 1;
+            }
+            (k > start + 1 && ops.get(k).is_some_and(|o| matches!(o.op.as_slice(), b"W" | b"W*")) && ops.get(k + 1).is_some_and(|o| o.is("n")))
+                .then_some(start + 1..k + 2)
+        })
+        .flatten();
+    let changed = crate::text::splice(&pieces, &ops, |index| {
+        if start == end && index == target {
+            // No scope of its own yet: one around the drawing, with the crop inside.
+            let mut out = vec![Op::new("q", vec![])];
+            out.extend(clip.iter().cloned());
+            out.extend(ops.get(index).cloned());
+            out.push(Op::new("Q", vec![]));
+            (out, false)
+        } else if start != end && index == start + 1 {
+            // Inside the scope's `q`, before whatever it draws (in place of its old crop).
+            (clip.clone(), old_clip.is_none())
+        } else if old_clip.as_ref().is_some_and(|r| r.contains(&index)) {
+            (Vec::new(), false)
         } else {
             (Vec::new(), true)
         }
@@ -672,9 +786,24 @@ pub(crate) fn translate_images(doc: &mut Document, page: usize, indexes: &[usize
             plans.remove(&(stream, index));
             clips.insert((stream, at), c);
         }
+        // An image already alone in `q cm Do Q` moves by changing that `cm`, not by nesting another.
+        let mut folds = std::collections::BTreeMap::new();
+        for index in 0..ops.len() {
+            let Some(&(movement, _, _)) = plans.get(&(stream, index)) else { continue };
+            let Some((at, cm)) = enclosing_transform(&ops, index, index) else { continue };
+            let folded = movement.then(&cm);
+            if !folded.0.iter().all(|v| v.is_finite() && v.abs() <= 1e12) {
+                return Err(EditError::Invalid("the image move is too large".into()));
+            }
+            plans.remove(&(stream, index));
+            folds.insert(at, folded);
+        }
         let changed = crate::text::splice(&pieces, &ops, |index| {
             if let Some(c) = clips.remove(&(stream, index)) {
                 return (vec![Op::new("cm", c.0.map(Object::Real).to_vec())], true);
+            }
+            if let Some(m) = folds.remove(&index) {
+                return (vec![Op::new("cm", m.0.map(Object::Real).to_vec())], false);
             }
             let Some((matrix, _, _)) = plans.remove(&(stream, index)) else { return (Vec::new(), true) };
             let original = ops.get(index).cloned().into_iter();

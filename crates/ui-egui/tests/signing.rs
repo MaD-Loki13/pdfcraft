@@ -64,6 +64,35 @@ fn field<'a>(h: &'a Harness<'static, PdfCraftApp>, label: &'a str) -> egui_kitte
 }
 
 #[test]
+fn ctrl_alt_q_types_an_email_without_quitting() {
+    let mut h = harness(dir());
+    h.state_mut().execute("sign.digital");
+    let (a, b) = (at(&h, 40.0, 90.0), at(&h, 220.0, 40.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().sign_draft.as_ref().unwrap().step, SignStep::Configure);
+    field(&h, "Email Address").click();
+    h.run_steps(1);
+    field(&h, "Email Address").type_text("test");
+    h.run_steps(1);
+    // The key and text events produced by Ctrl+Alt+Q on German QWERTZ.
+    h.input_mut().events.push(egui::Event::Key {
+        key: egui::Key::Q,
+        physical_key: Some(egui::Key::Q),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers { ctrl: true, command: true, alt: true, ..Default::default() },
+    });
+    h.input_mut().events.push(egui::Event::Text("@".into()));
+    h.step();
+    assert!(!h.output().viewport_output.values().any(|v| v.commands.contains(&egui::ViewportCommand::Close)));
+    assert_eq!(h.state().sign_draft.as_ref().unwrap().new_id.email, "test@");
+    field(&h, "Email Address").type_text("example.org");
+    h.run_steps(1);
+    assert_eq!(h.state().sign_draft.as_ref().unwrap().new_id.email, "test@example.org");
+    assert_eq!(h.state().dialog, Some(Dialog::Sign));
+}
+
+#[test]
 fn drawing_a_signature_creating_an_id_signing_and_trusting() {
     let dir = dir();
     let mut h = harness(dir.clone());
@@ -80,7 +109,7 @@ fn drawing_a_signature_creating_an_id_signing_and_trusting() {
     h.run_steps(1);
     field(&h, "Name").type_text("Grace Hopper");
     h.state_mut().sign_draft.as_mut().unwrap().new_id.key = 3;
-    for (label, text) in [("Password", "secret1"), ("Confirm Password", "secret1")] {
+    for (label, text) in [("Password", "secret12"), ("Confirm Password", "secret12")] {
         field(&h, label).click();
         h.run_steps(1);
         field(&h, label).type_text(text);
@@ -102,7 +131,7 @@ fn drawing_a_signature_creating_an_id_signing_and_trusting() {
     h.get_by_label("Sign").click();
     h.run_steps(3);
     h.get_by_label("The password is incorrect.");
-    h.state_mut().sign_draft.as_mut().unwrap().password = "secret1".into();
+    h.state_mut().sign_draft.as_mut().unwrap().password = "secret12".into();
     field(&h, "Reason").click();
     h.run_steps(1);
     field(&h, "Reason").type_text("I approve");
@@ -123,11 +152,16 @@ fn drawing_a_signature_creating_an_id_signing_and_trusting() {
     h.get_by_label_contains("Signed by Grace Hopper").click();
     h.run_steps(2);
     h.get_by_label("Signature validity is UNKNOWN:");
+    // Seed a find so the trust path proves it invalidates the view: trust rebuilds
+    // the display copy, and the next frame must draw from it without any zoom change.
+    h.state_mut().views[0].find = Some(pdfcraft_ui_egui::canvas::Find { matches: vec![(0, 0..5)], ..Default::default() });
     h.get_by_label("Add to trusted certificates").click();
     h.run_steps(3);
     h.get_by_label("Signed and all signatures are valid.");
     let s = h.state();
     assert_eq!(s.session.get(s.views[0].id).unwrap().signatures[0].status, SignatureStatus::Valid);
+    assert!(s.views[0].find.as_ref().is_some_and(|f| f.matches.is_empty()), "trust invalidates the view without zooming");
+    assert!(!s.session.get(s.views[0].id).unwrap().dirty, "trust alone is not an edit");
     // Show certificate: the Certificate Viewer.
     h.get_by_label("Show certificate…").click();
     h.run_steps(3);
@@ -153,8 +187,60 @@ fn drawing_a_signature_creating_an_id_signing_and_trusting() {
     assert_eq!(s.views.len(), 2);
     let v = s.session.get(s.views[1].id).unwrap();
     assert!(v.name.contains("signed version") && v.signatures.iter().any(|x| x.signed));
+    assert!(s.views[0].snapshot.is_none());
+    assert!(s.views[1].snapshot.as_ref().is_some_and(|snap| snap.kind == pdfcraft_ui_egui::canvas::SnapshotKind::SignedVersion));
+    // A repeat click reuses the snapshot tab instead of opening another identical one.
+    h.get_by_label("View signed version").click();
+    h.run_steps(3);
+    let s = h.state();
+    assert_eq!((s.views.len(), s.active), (2, Some(1)));
+    // A repeat from the original tab reuses it too.
+    h.state_mut().active = Some(0);
+    h.run_steps(1);
+    h.get_by_label("View signed version").click();
+    h.run_steps(3);
+    let s = h.state();
+    assert_eq!((s.views.len(), s.active), (2, Some(1)));
+    // The snapshot tab says what it is.
+    h.get_by_label_contains("You are viewing the signed version of");
+    // Closing a clean snapshot closes the tab with no save prompt. The bar's own
+    // Close is addressed from its message, because the tab chrome has a Close button
+    // with the same label.
+    let label = h.get_by_label_contains("You are viewing the signed version of");
+    let label_row = label.rect().y_range();
+    let mut node = label;
+    let mut close = None;
+    for _ in 0..4 {
+        if let Some(pill) = node.query_by_label("Close") {
+            close = Some(pill);
+            break;
+        }
+        let Some(up) = node.parent() else { break };
+        node = up;
+    }
+    let close = close.expect("the notice bar holds its own Close");
+    // The bar's Close sits in the bar's row and the tab chrome's sits above it. Without
+    // this the walk could reach the chrome's button, which closes the same tab, and the
+    // test would pass with the bar's own button never pressed.
+    assert!(label_row.contains(close.rect().center().y), "the Close found is the bar's own");
+    close.click();
+    h.run_steps(2);
+    assert_eq!(h.state().views.len(), 1);
+    assert!(h.state().close_request.is_none());
+    // Closing a dirty snapshot asks about saving instead of closing at once.
+    h.get_by_label("View signed version").click();
+    h.run_steps(3);
+    let id = h.state().views[1].id;
+    h.state_mut().session.apply(id, pdfcraft_engine::Edit::SetInfo { key: "Title".into(), value: "Dirty".into() }).unwrap();
+    h.state_mut().views[1].close_requested = true;
+    h.run_steps(2);
+    assert_eq!(h.state().views.len(), 2);
+    h.get_by_label("Save changes to “contract_signed (signed version).pdf” before closing?");
+    h.get_by_label("Don't save").click();
+    h.run_steps(2);
+    assert_eq!(h.state().views.len(), 1);
     // Trusted certificates and the ID list persist.
-    let saved = s.persist();
+    let saved = h.state().persist();
     let mut fresh = PdfCraftApp::new();
     fresh.set_option("language", "en").unwrap();
     fresh.restore(&saved);
@@ -313,6 +399,60 @@ fn the_fill_and_sign_signature_or_an_image_shows_in_a_digital_signature() {
     // A saved choice that can't be read back falls back to the name.
     fresh.restore(r#"{"sign_graphic": {"Image": "not base64"}}"#);
     assert_eq!(fresh.sign_graphic, SignGraphic::Name);
+}
+
+/// The decoded text of every visible signature appearance (Helvetica forms) in a signed file.
+fn stamped(path: &std::path::Path) -> String {
+    use pdfcraft_cos::{Document, ObjRef, Object};
+    let doc = Document::open(std::sync::Arc::new(std::fs::read(path).unwrap())).unwrap();
+    let mut text = String::new();
+    for num in doc.object_numbers() {
+        if let Object::Stream(s) = &*doc.get(ObjRef { num, generation: 0 })
+            && s.dict.name(b"Subtype") == Some(b"Form")
+        {
+            let content = String::from_utf8_lossy(&s.decoded().unwrap()).into_owned();
+            if content.contains("/Helv") {
+                text.push_str(&content);
+            }
+        }
+    }
+    text
+}
+
+/// A signature signed in German is stamped with German labels. In Simplified Chinese, whose
+/// labels the signature's font can't draw, it is stamped with English ones and the dialog says
+/// so under the preview: signing neither fails nor writes `?` for them.
+#[test]
+fn the_signature_labels_follow_the_interface_language() {
+    use pdfcraft_ui_egui::i18n::{Lang, tr};
+    let p12 = concat!(env!("CARGO_MANIFEST_DIR"), "/../sign/tests/data/ec-p256.p12");
+    let cert = pdfcraft_engine::sign::pkcs12::open(&std::fs::read(p12).unwrap(), "test").unwrap().certificate;
+    let note = "The labels are in English: the signature's font can't draw them in this language.";
+    for (code, labels, in_english) in [("de", ["(Digital", "(Grund:", "(Datum:"], false), ("zh-hans", ["(Digitally", "(Reason:", "(Date:"], true)] {
+        let dir = dir().join(code);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut h = harness(dir.clone());
+        let lang = Lang::from_code(code).unwrap();
+        h.state_mut().set_option("language", code).unwrap();
+        h.state_mut().start_signing(0, Some([20.0, 110.0, 280.0, 180.0]), None, None);
+        let entry = h.state_mut().add_digital_id(p12, &cert);
+        {
+            let d = h.state_mut().sign_draft.as_mut().unwrap();
+            (d.selected, d.step, d.password, d.reason) = (Some(entry), SignStep::SignAs, "test".into(), "OK".into());
+            d.appearance.reason = true;
+        }
+        h.run_steps(3);
+        assert_eq!(h.query_all_by_label(tr(lang, note)).count(), usize::from(in_english), "{code}: the note under the preview");
+        field(&h, tr(lang, "Sign")).click();
+        h.run_steps(6);
+        assert_eq!(h.state().sign_draft.as_ref().and_then(|d| d.error.clone()), None, "{code}");
+        let content = stamped(&dir.join("contract_signed.pdf"));
+        for label in labels {
+            assert!(content.contains(label), "{code}: {label}: {content}");
+        }
+        assert!(!content.contains('?'), "{code}: {content}");
+        assert_eq!(content.contains("Digitally") || content.contains("Reason"), in_english, "{code}: {content}");
+    }
 }
 
 #[test]

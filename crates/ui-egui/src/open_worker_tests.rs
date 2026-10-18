@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use serde_json::{Value, json};
 
 use crate::{PdfCraftApp, control::ControlClient, open_worker};
@@ -404,5 +405,268 @@ fn a_startup_document_waits_for_an_active_document_to_prepare() {
     harness.step();
     assert_eq!(harness.state().views.len(), 2);
     assert_eq!(harness.state().active, Some(0), "the chosen document keeps focus");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+#[allow(clippy::expect_used)]
+fn tool_modal_keeps_picked_recipient_when_other_open_is_ready() {
+    for same_batch in [true, false] {
+        let timing = if same_batch { "batch" } else { "later" };
+        let original_a = fixture(2);
+        let original_b = fixture(1);
+        let picked = tool_open_file(&format!("recipient-{timing}-a"), "pdf", &original_a);
+        let other = tool_open_file(&format!("recipient-{timing}-b"), "pdf", &original_b);
+        let mut harness = tool_open_harness();
+        harness.state_mut().pick_override = Some(vec![picked.0.to_string_lossy().into_owned()]);
+        let held = HeldToolOpen::install(&mut harness);
+        harness.state_mut().run_command("export.text");
+        harness.step();
+        held.started.recv_timeout(Duration::from_secs(5)).expect("picked A reached prepare barrier");
+        harness.state_mut().open_path(other.0.to_string_lossy().as_ref());
+        held.release.send(()).expect("release picked A");
+        held.finished.recv_timeout(Duration::from_secs(5)).expect("picked A is ready");
+        held.started.recv_timeout(Duration::from_secs(5)).expect("ordinary B reached prepare barrier");
+        if same_batch {
+            held.release.send(()).expect("release ordinary B before A admission");
+            held.finished.recv_timeout(Duration::from_secs(5)).expect("ordinary B is also ready");
+        }
+        harness.step();
+        assert!(matches!(harness.state().dialog, Some(crate::Dialog::Export(_))));
+        let active = harness.state().active.expect("active Export recipient");
+        let doc = harness.state().session.get(harness.state().views[active].id).expect("Export recipient document");
+        assert_eq!(doc.path.as_deref(), Some(picked.0.to_string_lossy().as_ref()), "Export must retain picked A in {timing} completion timing");
+        assert_eq!(doc.info.pages.len(), 2);
+        assert!(!doc.dirty && doc.can_undo().is_none() && doc.can_redo().is_none());
+        assert_eq!(doc.saved_bytes().as_slice(), original_a.as_slice());
+        assert_eq!(harness.state().views.len(), 1);
+        assert_eq!(harness.state().pending_opens.len(), 1);
+        if !same_batch {
+            held.release.send(()).expect("release ordinary B after A Export opens");
+            held.finished.recv_timeout(Duration::from_secs(5)).expect("ordinary B is now ready");
+        }
+        harness.run_steps(2);
+        assert!(matches!(harness.state().dialog, Some(crate::Dialog::Export(_))));
+        assert_eq!(harness.state().active, Some(active));
+        assert_eq!(harness.state().views.len(), 1, "ready B stays unadmitted while A's modal is open");
+        assert_eq!(harness.state().pending_opens.len(), 1);
+        assert_eq!(harness.state().pending_opens[0].path.as_deref(), Some(other.0.to_string_lossy().as_ref()));
+        // Use the actual modal's Cancel button, rather than clearing its state directly.
+        harness.get_by_label("Cancel").click();
+        harness.run_steps(2);
+        assert!(harness.state().dialog.is_none() && harness.state().pending_opens.is_empty());
+        assert_eq!(harness.state().views.len(), 2, "cancel releases B's retained result exactly once");
+        let active = harness.state().active.expect("ordinary B activates after cancel");
+        let doc = harness.state().session.get(harness.state().views[active].id).expect("ordinary B document");
+        assert_eq!(doc.path.as_deref(), Some(other.0.to_string_lossy().as_ref()));
+        assert_eq!(doc.info.pages.len(), 1);
+        assert!(!doc.dirty && doc.can_undo().is_none() && doc.can_redo().is_none());
+        assert_eq!(doc.saved_bytes().as_slice(), original_b.as_slice());
+        harness.run_steps(2);
+        assert_eq!(harness.state().views.len(), 2);
+        assert!(harness.state().dialog.is_none(), "A's tool does not run again after B admission");
+        for (file, original) in [(&picked, &original_a), (&other, &original_b)] {
+            assert_eq!(std::fs::read(&file.0).expect("read unchanged modal fixture"), *original);
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::expect_used)]
+fn tool_password_prompt_retains_other_ready_open_through_retry() {
+    let protected = encrypted_tool_fixture();
+    let picked = tool_open_file("password-recipient-a", "pdf", &protected);
+    let other = tool_open_file("password-recipient-b", "pdf", &fixture(2));
+    let mut harness = tool_open_harness();
+    harness.state_mut().pick_override = Some(vec![picked.0.to_string_lossy().into_owned()]);
+    let held = HeldToolOpen::install(&mut harness);
+    harness.state_mut().run_command("export.text");
+    harness.step();
+    held.started.recv_timeout(Duration::from_secs(5)).expect("encrypted A reached prepare barrier");
+    harness.state_mut().open_path(other.0.to_string_lossy().as_ref());
+    held.release.send(()).expect("release encrypted A");
+    held.finished.recv_timeout(Duration::from_secs(5)).expect("encrypted A is ready");
+    held.started.recv_timeout(Duration::from_secs(5)).expect("ordinary B reached prepare barrier");
+    held.release.send(()).expect("release ordinary B");
+    held.finished.recv_timeout(Duration::from_secs(5)).expect("ordinary B is ready before prompt admission");
+    harness.step();
+    let prompt = harness.state().password_prompt.as_ref().expect("picked A password prompt");
+    assert_eq!(prompt.path.as_deref(), Some(picked.0.to_string_lossy().as_ref()));
+    assert_eq!(prompt.then, Some("export.text"));
+    harness.run_steps(2);
+    assert!(harness.state().views.is_empty());
+    assert_eq!(harness.state().pending_opens.len(), 1, "B cannot replace A's visible password prompt");
+    harness.state_mut().submit_password(Some("wrong-password".into()));
+    held.wait_started();
+    held.complete(&mut harness);
+    // During the retry gap no modal exists, so ordinary B may admit. A still owns its
+    // continuation and its wrong-password prompt, and success must reactivate A.
+    assert_eq!(harness.state().views.len(), 1);
+    let prompt = harness.state().password_prompt.as_ref().expect("picked A wrong-password prompt");
+    assert_eq!(prompt.path.as_deref(), Some(picked.0.to_string_lossy().as_ref()));
+    assert!(prompt.error.is_some());
+    assert_eq!(prompt.then, Some("export.text"));
+    assert!(harness.state().dialog.is_none());
+    harness.state_mut().submit_password(Some("tool-password".into()));
+    held.wait_started();
+    held.complete(&mut harness);
+    assert!(harness.state().password_prompt.is_none() && harness.state().pending_opens.is_empty());
+    assert_eq!(harness.state().views.len(), 2);
+    assert!(matches!(harness.state().dialog, Some(crate::Dialog::Export(_))));
+    let active = harness.state().active.expect("A reactivates for Export");
+    let doc = harness.state().session.get(harness.state().views[active].id).expect("A Export recipient");
+    assert_eq!(doc.path.as_deref(), Some(picked.0.to_string_lossy().as_ref()));
+    assert_eq!(doc.info.pages.len(), 2);
+    assert!(!doc.dirty && doc.can_undo().is_none());
+    harness.run_steps(2);
+    assert_eq!(harness.state().active, Some(active));
+    harness.get_by_label("Cancel").click();
+    harness.run_steps(2);
+    assert!(harness.state().dialog.is_none() && harness.state().pending_opens.is_empty());
+    assert_eq!(harness.state().views.len(), 2);
+    assert_eq!(std::fs::read(&picked.0).expect("read original encrypted A"), protected.as_slice());
+}
+
+#[test]
+#[allow(clippy::expect_used)]
+fn tool_picker_keeps_picked_recipient_when_other_open_is_ready() {
+    for cancel in [false, true] {
+        let case = if cancel { "picker-cancel" } else { "picker-insert" };
+        let original_a = fixture(2);
+        let original_b = fixture(1);
+        let original_c = fixture(1);
+        let picked = tool_open_file(&format!("{case}-a"), "pdf", &original_a);
+        let other = tool_open_file(&format!("{case}-b"), "pdf", &original_b);
+        let insert = tool_open_file(&format!("{case}-c"), "pdf", &original_c);
+        let mut harness = tool_open_harness();
+        harness.state_mut().pick_override = Some(vec![picked.0.to_string_lossy().into_owned()]);
+        let held = HeldToolOpen::install(&mut harness);
+        harness.state_mut().run_command("page.insert");
+        harness.step();
+        held.started.recv_timeout(Duration::from_secs(5)).expect("picked A reached prepare barrier");
+        assert!(harness.state().views.is_empty());
+        assert_eq!(harness.state().pending_opens.len(), 1);
+        harness.state_mut().open_path(other.0.to_string_lossy().as_ref());
+        // A's first picker was consumed above. Its real Insert pages continuation must
+        // now queue this second picker, bound to A, when the prepared document commits.
+        harness.state_mut().pick_override = Some(if cancel { Vec::new() } else { vec![insert.0.to_string_lossy().into_owned()] });
+        held.release.send(()).expect("release picked A");
+        held.finished.recv_timeout(Duration::from_secs(5)).expect("picked A reply is ready");
+        held.started.recv_timeout(Duration::from_secs(5)).expect("ordinary B reached prepare barrier");
+        held.release.send(()).expect("release ordinary B");
+        held.finished.recv_timeout(Duration::from_secs(5)).expect("ordinary B reply is also ready");
+        assert_eq!(harness.state().pending_opens.len(), 2);
+
+        // Poll admission separately from consuming the picker callback: this reproduces
+        // the same ordering as a UI frame, with both worker replies already available.
+        harness.state_mut().poll_pending_opens();
+        assert_eq!(harness.state().views.len(), 1, "ready B must wait for A's Insert pages picker");
+        assert_eq!(harness.state().active, Some(0));
+        assert!(harness.state().dialog.is_none() && harness.state().password_prompt.is_none());
+        let a_id = harness.state().views[0].id;
+        let doc = harness.state().session.get(a_id).expect("picked A before picker completion");
+        assert_eq!(doc.path.as_deref(), Some(picked.0.to_string_lossy().as_ref()));
+        assert_eq!(doc.info.pages.len(), 2);
+        assert!(!doc.dirty && doc.can_undo().is_none() && doc.can_redo().is_none());
+        assert_eq!(harness.state().pending_opens.len(), 1);
+        assert_eq!(harness.state().pending_opens[0].path.as_deref(), Some(other.0.to_string_lossy().as_ref()));
+        harness.state_mut().poll_pending_opens();
+        assert_eq!(harness.state().views.len(), 1, "B remains held until the queued picker result is consumed");
+        assert_eq!(harness.state().active, Some(0));
+
+        // Consume the actual native-picker callback (or its empty-path cancellation).
+        harness.state_mut().process_picked();
+        let doc = harness.state().session.get(a_id).expect("A after picker completion");
+        assert_eq!(doc.info.pages.len(), if cancel { 2 } else { 3 });
+        assert_eq!(doc.dirty, !cancel);
+        assert_eq!(doc.can_undo().is_some(), !cancel);
+        assert!(doc.can_redo().is_none());
+        assert_eq!(harness.state().views.len(), 1);
+        assert_eq!(harness.state().pending_opens.len(), 1);
+        assert_eq!(harness.state().active, Some(0));
+
+        harness.step();
+        assert!(harness.state().pending_opens.is_empty());
+        assert_eq!(harness.state().views.len(), 2, "picker completion releases B exactly once");
+        let active = harness.state().active.expect("B activates after picker completion");
+        let doc = harness.state().session.get(harness.state().views[active].id).expect("ordinary B document");
+        assert_eq!(doc.path.as_deref(), Some(other.0.to_string_lossy().as_ref()));
+        assert_eq!(doc.info.pages.len(), 1);
+        assert!(!doc.dirty && doc.can_undo().is_none() && doc.can_redo().is_none());
+        harness.run_steps(2);
+        assert!(harness.state().pending_opens.is_empty() && harness.state().dialog.is_none());
+        assert_eq!(harness.state().views.len(), 2);
+        assert_eq!(harness.state().active, Some(active));
+        let doc = harness.state().session.get(a_id).expect("A retains exactly one insertion or cancellation");
+        assert_eq!(doc.info.pages.len(), if cancel { 2 } else { 3 });
+        assert_eq!(doc.dirty, !cancel);
+        assert_eq!(doc.can_undo().is_some(), !cancel);
+        assert!(doc.can_redo().is_none());
+        assert_eq!(doc.saved_bytes().as_slice(), original_a.as_slice(), "insertion preserves A's saved source");
+        for (file, original) in [(&picked, &original_a), (&other, &original_b), (&insert, &original_c)] {
+            assert_eq!(std::fs::read(&file.0).expect("read unchanged original picker fixture"), *original);
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+fn inline_tool_open_keeps_its_command_for_pdf_conversion_and_password_retry() {
+    for (name, bytes, encrypted) in
+        [("plain.pdf", fixture(1), false), ("converted.txt", b"Text to export".to_vec(), false), ("locked.pdf", encrypted_tool_fixture(), true)]
+    {
+        let path = std::env::temp_dir().join(format!("pdfcraft-inline-tool-{}-{name}", std::process::id()));
+        std::fs::write(&path, bytes).expect("write selected file");
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").expect("language preference");
+        assert!(app.ctx.is_none(), "this exercises the no-context inline path");
+        app.open_path_then(&path.to_string_lossy(), Some("export.text"));
+        if encrypted {
+            assert!(app.dialog.is_none());
+            assert_eq!(app.password_prompt.as_ref().expect("password prompt").then, Some("export.text"));
+            app.submit_password(Some("wrong".into()));
+            assert!(app.password_prompt.as_ref().expect("wrong-password prompt").error.is_some());
+            assert!(app.dialog.is_none());
+            app.submit_password(Some("tool-password".into()));
+        }
+        assert_eq!(app.views.len(), 1);
+        assert_eq!(app.active, Some(0));
+        assert!(matches!(app.dialog, Some(crate::Dialog::Export(_))), "the inline {name} retains its export command");
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[test]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+fn startup_files_wait_for_absolute_link_consent_and_preparation() {
+    let (mut h, _) = harness();
+    let source = h.state().views[0].id;
+    let path = std::env::temp_dir().join(format!("pdfcraft-open-consented-startup-{}.pdf", std::process::id()));
+    std::fs::write(&path, fixture(2)).expect("write linked PDF");
+    h.state_mut().open_remote_link(source, path.to_string_lossy().into_owned(), pdfcraft_render::RemoteDestination::Default);
+    h.state().startup_inbox.lock().expect("startup queue").push(("startup.pdf".into(), fixture(1)));
+    h.step();
+    assert!(h.state().pending_remote_link.is_some());
+    assert_eq!(h.state().startup_inbox.lock().expect("startup queue").len(), 1);
+    assert_eq!(h.state().views.len(), 1, "startup cannot replace the consent interaction");
+
+    let (gate, started, release, finished) = open_worker::prepare_gate();
+    h.state_mut().open_prepare_gate = Some(gate);
+    h.state_mut().resolve_pending_remote_link(true);
+    started.recv_timeout(Duration::from_secs(5)).expect("worker reached prepare barrier");
+    h.step();
+    let queued = h.state().startup_inbox.lock().expect("startup queue").len();
+    let visible = h.state().views.len();
+    // Always release before asserting: a failure must not strand the worker at the barrier.
+    release.send(()).expect("release prepare barrier");
+    finished.recv_timeout(Duration::from_secs(5)).expect("worker finished preparation");
+    assert_eq!(queued, 1, "startup bytes wait while the approved linked PDF prepares");
+    assert_eq!(visible, 1);
+    h.step();
+    let app = h.state();
+    assert_eq!(app.views.len(), 3);
+    assert_eq!(app.session.get(app.views[1].id).expect("linked document").path.as_deref(), path.to_str());
+    assert_eq!(app.session.get(app.views[2].id).expect("startup document").name, "startup.pdf");
+    assert_eq!(app.active, Some(1), "the user's approved navigation keeps focus");
     let _ = std::fs::remove_file(path);
 }

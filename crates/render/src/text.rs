@@ -14,7 +14,29 @@ use hayro::hayro_interpret::{
     BlendMode, ClipPath, Context, Device, GlyphDrawMode, Image, InterpreterCache, InterpreterSettings, Paint, PathDrawMode, SoftMask, interpret_page,
 };
 use kurbo::{Affine, BezPath, Rect, Shape};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// Semantic exclusions for statistics. Untagged text is retained; no layout guess is made.
+#[derive(Clone, Debug, Default)]
+pub struct TextFilter {
+    pub tables: bool,
+    pub code: bool,
+    /// Exclude Figure-marked text and invisible text layers, including OCR.
+    pub images: bool,
+    /// Page-local MCIDs whose structure ancestors match the selected exclusions.
+    pub mcids: HashSet<i32>,
+}
+
+impl TextFilter {
+    fn excludes(&self, tag: &[u8], mcid: Option<i32>) -> bool {
+        (self.tables && matches!(tag, b"Table" | b"TR" | b"TH" | b"TD" | b"THead" | b"TBody" | b"TFoot"))
+            || (self.code && tag == b"Code")
+            || (self.images && tag == b"Figure")
+            || mcid.is_some_and(|id| self.mcids.contains(&id))
+    }
+}
+
+mod search;
 
 /// One glyph on the page.
 #[derive(Clone, Debug, PartialEq)]
@@ -102,47 +124,7 @@ impl PageText {
 
     /// Search with Acrobat's find options, returning at most `limit` glyph ranges.
     pub fn find_opts_limited(&self, needle: &str, case_sensitive: bool, whole_words: bool, limit: usize) -> Vec<std::ops::Range<usize>> {
-        if limit == 0 {
-            return Vec::new();
-        }
-        let fold = |s: &str| if case_sensitive { s.to_string() } else { fold_case(s) };
-        let needle: Vec<char> = fold(needle).split_whitespace().collect::<Vec<_>>().join(" ").chars().collect();
-        if needle.is_empty() {
-            return Vec::new();
-        }
-        // Flatten to chars with the glyph index each char came from.
-        let mut chars: Vec<(char, usize)> = Vec::new();
-        for (i, g) in self.glyphs.iter().enumerate() {
-            if i > 0 && (self.space_before[i] || self.line_of[i] != self.line_of[i - 1]) && chars.last().is_some_and(|c| c.0 != ' ') {
-                chars.push((' ', i));
-            }
-            for c in fold(&g.text).chars() {
-                let c = if c.is_whitespace() { ' ' } else { c };
-                // The query collapses a run of whitespace to one space, so collapse the page too.
-                if c == ' ' && chars.last().is_some_and(|k| k.0 == ' ') {
-                    continue;
-                }
-                chars.push((c, i));
-            }
-        }
-        let word = |k: Option<&(char, usize)>| k.is_some_and(|c| c.0.is_alphanumeric());
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i + needle.len() <= chars.len() {
-            let bounded = !whole_words || (!word(i.checked_sub(1).and_then(|p| chars.get(p))) && !word(chars.get(i + needle.len())));
-            if bounded && chars[i..i + needle.len()].iter().map(|c| c.0).eq(needle.iter().copied()) {
-                let start = chars[i].1;
-                let end = chars[i + needle.len() - 1].1 + 1;
-                out.push(start..end);
-                if out.len() == limit {
-                    break;
-                }
-                i += needle.len();
-            } else {
-                i += 1;
-            }
-        }
-        out
+        search::find(self, needle, case_sensitive, whole_words, limit)
     }
 
     /// Glyph ranges of the matches a character matcher finds in the page text (words and lines
@@ -376,6 +358,10 @@ struct TextDevice {
     actual: Option<(usize, String, Vec<Drawn>)>,
     /// Every `/ActualText` replacement made on the page.
     replaced: Vec<Replaced>,
+    filter: TextFilter,
+    excluded_depth: Option<usize>,
+    actual_filtered: bool,
+    partial_replacement: bool,
 }
 
 /// An `/ActualText` replacement: the glyph standing for it in `TextDevice::glyphs` (none for an
@@ -440,7 +426,16 @@ fn merge(drawn: &[Drawn], text: String) -> Option<Drawn> {
 
 impl TextDevice {
     fn new() -> Self {
-        TextDevice { glyphs: Vec::new(), depth: 0, actual: None, replaced: Vec::new() }
+        TextDevice {
+            glyphs: Vec::new(),
+            depth: 0,
+            actual: None,
+            replaced: Vec::new(),
+            filter: TextFilter::default(),
+            excluded_depth: None,
+            actual_filtered: false,
+            partial_replacement: false,
+        }
     }
 
     /// Ends the open `/ActualText` replacement (ISO 32000-2 §14.9.4): its glyphs become one glyph
@@ -453,6 +448,12 @@ impl TextDevice {
     /// Unicode). An empty one (a soft hyphen at a line break, say) stands for no text at all.
     fn end_actual_text(&mut self) {
         let Some((_, text, drawn)) = self.actual.take() else { return };
+        if std::mem::take(&mut self.actual_filtered) {
+            // ActualText has no mapping from replacement words to individual glyphs. A mixed
+            // span cannot be filtered honestly; a wholly excluded span can simply be omitted.
+            self.partial_replacement |= !drawn.is_empty();
+            return;
+        }
         let Some(glyph) = merge(&drawn, text.clone()) else {
             self.glyphs.extend(drawn.into_iter().filter(|d| !d.2.text.chars().all(|c| c.is_control())));
             return;
@@ -554,7 +555,11 @@ impl<'a> Device<'a> for TextDevice {
     fn draw_path(&mut self, _: &BezPath, _: Affine, _: &Paint<'a>, _: &PathDrawMode) {}
     fn push_clip_path(&mut self, _: &ClipPath) {}
     fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
-    fn draw_glyph(&mut self, glyph: &Glyph<'a>, transform: Affine, glyph_transform: Affine, _: &Paint<'a>, _: &GlyphDrawMode) {
+    fn draw_glyph(&mut self, glyph: &Glyph<'a>, transform: Affine, glyph_transform: Affine, _: &Paint<'a>, mode: &GlyphDrawMode) {
+        if self.excluded_depth.is_some() || (self.filter.images && matches!(mode, GlyphDrawMode::Invisible)) {
+            self.actual_filtered |= self.actual.is_some();
+            return;
+        }
         // Inside an `/ActualText` replacement only the glyph's box matters.
         let replaced = self.actual.is_some();
         let text = match glyph.as_unicode() {
@@ -635,12 +640,15 @@ impl<'a> Device<'a> for TextDevice {
     fn draw_image(&mut self, _: Image<'a, '_>, _: Affine) {}
     fn pop_clip_path(&mut self) {}
     fn pop_transparency_group(&mut self) {}
-    fn begin_marked_content(&mut self, _: &[u8], _: Option<i32>) {
+    fn begin_marked_content(&mut self, tag: &[u8], mcid: Option<i32>) {
         self.depth = self.depth.saturating_add(1);
+        if self.excluded_depth.is_none() && self.filter.excludes(tag, mcid) {
+            self.excluded_depth = Some(self.depth);
+        }
     }
     fn actual_text(&mut self, text: &[u8]) {
         // A replacement nested in another is already covered by the outer one.
-        if self.actual.is_none() {
+        if self.actual.is_none() && self.excluded_depth.is_none() {
             self.actual = Some((self.depth, pdfcraft_cos::PdfString::literal(text).to_text(), Vec::new()));
         }
     }
@@ -648,14 +656,21 @@ impl<'a> Device<'a> for TextDevice {
         if self.actual.as_ref().is_some_and(|(depth, _, _)| *depth == self.depth) {
             self.end_actual_text();
         }
+        if self.excluded_depth == Some(self.depth) {
+            self.excluded_depth = None;
+        }
         self.depth = self.depth.saturating_sub(1);
     }
 }
 
 /// Extract the text of one page. Panics inside the interpreter are the caller's to catch.
 pub(crate) fn extract_page(pdf: &Pdf, page: usize, settings: &InterpreterSettings) -> Option<PageText> {
+    extract_page_filtered(pdf, page, settings, TextFilter::default()).ok()
+}
+
+pub(crate) fn extract_page_filtered(pdf: &Pdf, page: usize, settings: &InterpreterSettings, filter: TextFilter) -> Result<PageText, String> {
     let pages = pdf.pages();
-    let p = pages.get(page)?;
+    let p = pages.get(page).ok_or("the page could not be read")?;
     let (w, h) = p.render_dimensions();
     let cache = InterpreterCache::new();
     // Annotation appearances are included: form-field values and comment text are searchable,
@@ -664,9 +679,13 @@ pub(crate) fn extract_page(pdf: &Pdf, page: usize, settings: &InterpreterSetting
     let initial = p.initial_transform(true).to_kurbo();
     let mut ctx = Context::new(initial, Rect::new(0.0, 0.0, w as f64, h as f64), &cache, p.xref(), settings);
     let mut dev = TextDevice::new();
+    dev.filter = filter;
     interpret_page(p, &mut ctx, &mut dev);
     // A replacement the content never closed ends with the page.
     dev.finish();
+    if dev.partial_replacement {
+        return Err("a replacement text span mixes included and excluded content; disable the exclusions to count this page".into());
+    }
     let glyphs = dev.glyphs;
     // Text on a curved path: glyphs that each continue the previous one's line while the
     // direction turns. Each such run is one line.
@@ -781,7 +800,7 @@ pub(crate) fn extract_page(pdf: &Pdf, page: usize, settings: &InterpreterSetting
     for f in extra {
         emit(&mut text, &f.ids, &f.line_of, &f.space_before, None);
     }
-    Some(text)
+    Ok(text)
 }
 
 /// Glyphs in reading order, as indices into the page's glyphs, with their lines and word gaps.
@@ -1719,6 +1738,60 @@ mod tests {
         for page in 0..2 {
             assert_eq!(marked_text(&pdf, page).plain_text(), "aน้ำb\naxyb", "page {page}");
         }
+    }
+
+    /// One page per `(encoding, content)`, in Helvetica (`/F1`).
+    fn encoded_pages(pages: &[(lopdf::Object, &[u8])]) -> Pdf {
+        use lopdf::{Document, Object, Stream, dictionary};
+        let mut doc = Document::with_version("1.7");
+        let pages_id = doc.new_object_id();
+        let mut kids = Vec::new();
+        for (encoding, content) in pages {
+            let font =
+                doc.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => encoding.clone() });
+            let content = doc.add_object(Stream::new(dictionary! {}, content.to_vec()));
+            let page = doc.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![Object::Integer(0), Object::Integer(0), Object::Integer(300), Object::Integer(300)], "Resources" => dictionary! {"Font" => dictionary! {"F1" => font}}, "Contents" => content });
+            kids.push(Object::Reference(page));
+        }
+        let count = kids.len() as i64;
+        doc.objects.insert(pages_id, dictionary! {"Type" => "Pages", "Kids" => kids, "Count" => count}.into());
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages_id});
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        Pdf::new(std::sync::Arc::new(bytes)).unwrap()
+    }
+
+    /// The Annex D.2 alias codes extract as the ink they draw, not as formatting characters.
+    ///
+    /// WinAnsiEncoding gives 0xAD and 0xA0 the glyph names `hyphen` and `space`, the names it
+    /// also gives 0x2D and 0x20, and MacRomanEncoding gives 0xCA `space`. Reporting the Adobe
+    /// Glyph List values U+00AD and U+00A0 for them hid visible text: a soft hyphen is invisible,
+    /// so "well-known" written that way matched no search and no redaction pattern.
+    /// `XiaoBiaoSong.pdf` in the pdf.js corpus drew 104 of them.
+    ///
+    /// A `/Differences` entry naming `sfthyphen` or `nbspace` is a deliberate statement about one
+    /// code and keeps its glyph list value. pdftotext draws the same line: on this fixture it
+    /// reads the base-encoded codes as "a-b a b" and the named ones as U+00AD.
+    #[test]
+    fn the_annex_d2_alias_codes_read_as_an_ordinary_hyphen_and_space() {
+        use lopdf::{Object, dictionary};
+        let name = |n: &str| Object::Name(n.as_bytes().to_vec());
+        let differences = Object::Dictionary(dictionary! {
+            "Type" => "Encoding",
+            "BaseEncoding" => "WinAnsiEncoding",
+            "Differences" => vec![Object::Integer(88), name("sfthyphen"), Object::Integer(89), name("nbspace")],
+        });
+        let pdf = encoded_pages(&[
+            (name("WinAnsiEncoding"), &b"BT /F1 20 Tf 1 0 0 1 20 150 Tm (a\xadb\xa0c) Tj ET"[..]),
+            (name("MacRomanEncoding"), &b"BT /F1 20 Tf 1 0 0 1 20 150 Tm (a\xcab) Tj ET"[..]),
+            (differences, &b"BT /F1 20 Tf 1 0 0 1 20 150 Tm (aXbYc) Tj ET"[..]),
+        ]);
+        let texts =
+            |page| extract_page(&pdf, page, &InterpreterSettings::default()).unwrap().glyphs.iter().map(|g| g.text.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(0), ["a", "-", "b", " ", "c"], "WinAnsi 0xAD and 0xA0");
+        assert_eq!(texts(1), ["a", " ", "b"], "MacRoman 0xCA");
+        assert_eq!(texts(2), ["a", "\u{ad}", "b", "\u{a0}", "c"], "a named glyph keeps its glyph list value");
     }
 
     #[test]

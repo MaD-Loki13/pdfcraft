@@ -143,6 +143,108 @@ fn values(doc: &Document) -> Vec<(String, Vec<String>)> {
 }
 
 #[test]
+fn xml_exports_preserve_whitespace_in_field_names() {
+    let names = ["Line\nName", "Line\tName", "Line\rName", "Line\r\nName", "\t Leading\nTrailing \t", "Line Name"];
+    let value = "value\twith\nlines\r\nand <XML> & \"quotes\"";
+    let mut src = one_field();
+    pdfcraft_forms::delete_field(&mut src, "Name").unwrap();
+    for (index, name) in names.iter().enumerate() {
+        let placeholder = format!("field{index}");
+        add_field(&mut src, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: true }, Some(&placeholder)).unwrap();
+        // Existing PDFs can have leading/trailing whitespace even though add_field trims it.
+        let field = fields(&src).into_iter().find(|f| f.name == placeholder).unwrap();
+        src.update_dict(field.obj, |d| d.set(b"T".to_vec(), PdfString::text(name))).unwrap();
+        set_value(&mut src, name, &FieldValue::Text(format!("{index}: {value}"))).unwrap();
+    }
+    let source_bytes = write_full(&src, &SaveOptions::default()).unwrap();
+    let src = Document::open(Arc::new(source_bytes.clone())).unwrap();
+    for format in [Format::Xml, Format::Xfdf] {
+        let exported = if format == Format::Xfdf { export_xfdf(&src, false, true, "form.pdf") } else { export_data(&src, format) };
+        let xml = roxmltree::Document::parse(&exported).unwrap();
+        let exported_names: Vec<_> = if format == Format::Xfdf {
+            xml.descendants().filter(|n| n.has_tag_name("field")).map(|n| n.attribute("name").unwrap()).collect()
+        } else {
+            xml.root_element()
+                .children()
+                .filter(|n| n.is_element())
+                .map(|n| n.attribute(("http://ns.adobe.com/xfdf-transition/", "original")).unwrap())
+                .collect()
+        };
+        assert_eq!(exported_names, names, "{format:?}: {exported}");
+        let mut dst = Document::open(Arc::new(source_bytes.clone())).unwrap();
+        for name in names {
+            set_value(&mut dst, name, &FieldValue::Text("replace me".into())).unwrap();
+        }
+        let report = import(&mut dst, exported.as_bytes()).unwrap();
+        assert_eq!(report.fields, names.len(), "{format:?}: {report:?}");
+        assert!(report.rejected.is_empty(), "{report:?}");
+        let saved = write_full(&dst, &SaveOptions::default()).unwrap();
+        let reopened = Document::open(Arc::new(saved)).unwrap();
+        assert_eq!(values(&reopened), values(&src), "{format:?}");
+    }
+    assert_eq!(write_full(&src, &SaveOptions::default()).unwrap(), source_bytes, "export must not change the source PDF");
+}
+
+#[test]
+fn xfdf_exports_preserve_whitespace_in_comment_attributes() {
+    let mut src = one_field();
+    let shape = Shape::Note { at: [100.0, 500.0], icon: pdfcraft_annot::NoteIcon::Comment };
+    let names = ["note\tline\nidentity", "note line identity"];
+    let author = "Ada\tLovelace\nReview";
+    let subject = "Subject\twith\nlines\r\nand & quotes\"";
+    for name in names {
+        add_annotation(
+            &mut src,
+            &NewAnnotation { page: 0, style: Style::default_for(&shape), shape: shape.clone(), contents: name.into(), author: author.into() },
+            &Meta { id: name.into(), date: None },
+        )
+        .unwrap();
+    }
+    let annotation_refs = |doc: &Document| {
+        let page = pdfcraft_model::pages(doc)[0].obj;
+        doc.get(page)
+            .as_dict()
+            .unwrap()
+            .get(b"Annots")
+            .map(|a| doc.resolve(a))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Object::as_ref)
+            .filter(|r| doc.get(*r).as_dict().unwrap().name(b"Subtype") == Some(b"Text"))
+            .collect::<Vec<_>>()
+    };
+    for annotation in annotation_refs(&src) {
+        src.update_dict(annotation, |d| d.set(b"Subj".to_vec(), PdfString::text(subject))).unwrap();
+    }
+    let source_bytes = write_full(&src, &SaveOptions::default()).unwrap();
+    let mut dst = Document::open(Arc::new(source_bytes)).unwrap();
+    let file = "form\twith\nlines.pdf";
+    let xfdf = export_xfdf(&dst, true, false, file);
+    let xml = roxmltree::Document::parse(&xfdf).unwrap();
+    let notes: Vec<_> = xml.descendants().filter(|n| n.has_tag_name("text")).collect();
+    assert_eq!(notes.iter().map(|n| n.attribute("name").unwrap()).collect::<Vec<_>>(), names);
+    for note in notes {
+        assert_eq!(note.attribute("title"), Some(author));
+        assert_eq!(note.attribute("subject"), Some(subject));
+    }
+    assert_eq!(xml.descendants().find(|n| n.has_tag_name("f")).unwrap().attribute("href"), Some(file));
+    let before = annotation_refs(&dst);
+    let report = import(&mut dst, xfdf.as_bytes()).unwrap();
+    assert_eq!(report.comments, names.len());
+    assert_eq!(annotation_refs(&dst), before, "reimport must replace the original comments");
+    let saved = write_full(&dst, &SaveOptions::default()).unwrap();
+    let reopened = Document::open(Arc::new(saved)).unwrap();
+    for (annotation, name) in annotation_refs(&reopened).iter().zip(names) {
+        let dict = reopened.get(*annotation);
+        assert_eq!(text_of(&reopened, dict.as_dict().unwrap(), b"NM").as_deref(), Some(name));
+        assert_eq!(text_of(&reopened, dict.as_dict().unwrap(), b"T").as_deref(), Some(author));
+        assert_eq!(text_of(&reopened, dict.as_dict().unwrap(), b"Subj").as_deref(), Some(subject));
+    }
+}
+
+#[test]
 fn xfdf_round_trips_comments_and_values() {
     let src = filled();
     let xfdf = export_xfdf(&src, true, true, "form.pdf");
@@ -293,6 +395,60 @@ trailer\n<< /Root 1 0 R >>\n%%EOF\n";
 }
 
 #[test]
+fn xml_field_names_remain_valid_and_round_trip_without_collisions() {
+    assert_eq!(xml_name(".Value"), "_.Value");
+    let names = [
+        ("Area²", "Area_"),
+        ("Area_", "Area_"),
+        ("Aµ", "A_"),
+        ("µRate", "_Rate"),
+        ("²Rate", "_Rate"),
+        ("½Amount", "_Amount"),
+        ("1Rate", "_1Rate"),
+        ("Café", "Café"),
+        ("Δείγμα", "Δείγμα"),
+        ("姓名", "姓名"),
+        ("٣Value", "_٣Value"),
+        ("\u{345}Rate", "_\u{345}Rate"),
+        ("A\u{345}", "A\u{345}"),
+        ("Alpha_1-2", "Alpha_1-2"),
+        ("ns:value", "ns_value"),
+        ("-Value", "_-Value"),
+    ];
+    let mut src = one_field();
+    pdfcraft_forms::delete_field(&mut src, "Name").unwrap();
+    for (index, (name, _)) in names.iter().enumerate() {
+        add_field(&mut src, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some(name)).unwrap();
+        set_value(&mut src, name, &FieldValue::Text(format!("value-{index}"))).unwrap();
+    }
+    let source = Arc::new(write_full(&src, &SaveOptions::default()).unwrap());
+    let src = Document::open(source.clone()).unwrap();
+    let want = values(&src);
+    for format in [Format::Xml, Format::Xdp] {
+        let text = export_data(&src, format);
+        let xml = roxmltree::Document::parse(&text).unwrap();
+        let children: Vec<_> = xml.root_element().children().filter(|n| n.is_element()).collect();
+        assert_eq!(children.len(), names.len());
+        for (child, (original, tag)) in children.iter().zip(names) {
+            assert_eq!(child.tag_name().name(), tag);
+            assert_eq!(child.attribute(("http://ns.adobe.com/xfdf-transition/", "original")), (original != tag).then_some(original));
+        }
+        assert!(!src.is_modified(), "export must not change the source PDF");
+        assert_eq!(src.bytes().as_slice(), source.as_slice());
+
+        let mut dst = Document::open(source.clone()).unwrap();
+        for (name, _) in names {
+            set_value(&mut dst, name, &FieldValue::Text("replaced".into())).unwrap();
+        }
+        let report = import(&mut dst, text.as_bytes()).unwrap();
+        assert_eq!(report.fields, names.len());
+        assert!(report.rejected.is_empty(), "{report:?}");
+        let reopened = Document::open(Arc::new(write_full(&dst, &SaveOptions::default()).unwrap())).unwrap();
+        assert_eq!(values(&reopened), want, "{format:?}: sanitized names must preserve distinct original fields");
+    }
+}
+
+#[test]
 fn form_data_as_xml_csv_and_text() {
     let src = filled();
     let xml = export_data(&src, Format::Xml);
@@ -344,6 +500,41 @@ fn one_field() -> Document {
     .unwrap();
     add_field(&mut doc, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some("Name")).unwrap();
     Document::open(Arc::new(write_full(&doc, &SaveOptions::default()).unwrap())).unwrap()
+}
+
+#[test]
+fn csv_exports_preserve_carriage_returns_in_names_and_values() {
+    for (name, value, expected) in [
+        ("Name", "plain", "Name\nplain\n"),
+        ("Name", "Tail\r", "Name\n\"Tail\r\"\n"),
+        ("Name", "Alpha\rBeta", "Name\n\"Alpha\rBeta\"\n"),
+        ("Name", "\rLead", "Name\n\"\rLead\"\n"),
+        ("Name", "\r", "Name\n\"\r\"\n"),
+        ("Name", "Alpha\r\nBeta", "Name\n\"Alpha\r\nBeta\"\n"),
+        ("Name", "Alpha\nBeta", "Name\n\"Alpha\nBeta\"\n"),
+        ("Name", "comma,\r", "Name\n\"comma,\r\"\n"),
+        ("Name", "\"quoted\"\r", "Name\n\"\"\"quoted\"\"\r\"\n"),
+        ("Name", "before\r,\"after\"", "Name\n\"before\r,\"\"after\"\"\"\n"),
+        ("Na\rme", "both\r", "\"Na\rme\"\n\"both\r\"\n"),
+    ] {
+        let mut src = one_field();
+        let field = fields(&src)[0].obj;
+        src.update_dict(field, |d| d.set(b"T".to_vec(), PdfString::text(name))).unwrap();
+        set_value(&mut src, name, &FieldValue::Text(value.into())).unwrap();
+        let source = Arc::new(write_full(&src, &SaveOptions::default()).unwrap());
+        let src = Document::open(source.clone()).unwrap();
+        assert_eq!(values(&src), [(name.to_string(), vec![value.to_string()])]);
+        let csv = export_data(&src, Format::Csv);
+
+        let mut dst = Document::open(source).unwrap();
+        set_value(&mut dst, name, &FieldValue::Text("replaced".into())).unwrap();
+        let report = import(&mut dst, csv.as_bytes()).unwrap();
+        assert_eq!(report.fields, 1);
+        assert!(report.rejected.is_empty(), "{report:?}");
+        let reopened = Document::open(Arc::new(write_full(&dst, &SaveOptions::default()).unwrap())).unwrap();
+        assert_eq!(values(&reopened), [(name.to_string(), vec![value.to_string()])]);
+        assert_eq!(csv, expected, "CSV must quote CR as well as LF, commas and quotes");
+    }
 }
 
 /// #1321: the text export of a one-field form has no tab to tell it from CSV, so a comma in the
@@ -885,5 +1076,71 @@ fn duplicate_xfdf_annotation_flags_do_not_turn_on_unrelated_bits() {
         let annotations = doc.get(page).as_dict().and_then(|p| p.get(b"Annots")).map(|a| doc.resolve(a)).and_then(|a| a.as_array().cloned()).unwrap();
         let square = annotations.iter().filter_map(|a| doc.resolve(a).as_dict().cloned()).find(|d| d.name(b"Subtype") == Some(b"Square")).unwrap();
         assert_eq!(square.get(b"F").and_then(Object::as_int), Some(expected), "flags={flags}");
+    }
+}
+
+// XML comments and processing instructions are not field text (XML 1.0 §§2.5–2.6).
+fn split_text_values() -> [(&'static str, &'static str); 5] {
+    [
+        ("Ada<!--editor note--> Lovelace", "Ada Lovelace"),
+        ("<!--editor note-->Ada", "Ada"),
+        ("Ada<?editor keep?> Lovelace", "Ada Lovelace"),
+        (" Å<!--note--><![CDATA[<&>]]><?editor keep?>&#x03A9; ", " Å<&>Ω "),
+        ("<!--empty--><?editor keep?>", ""),
+    ]
+}
+
+#[test]
+fn xfdf_data_values_join_text_around_xml_comments_and_instructions() {
+    for (xml_text, expected) in split_text_values() {
+        let xml = format!(r#"<xfdf xmlns="http://ns.adobe.com/xfdf/"><fields><field name="Name"><value>{xml_text}</value></field></fields></xfdf>"#);
+        assert_eq!(data_values(xml.as_bytes()).unwrap(), vec![("Name".into(), vec![expected.to_string()])], "{xml_text}");
+    }
+}
+
+#[test]
+fn xfdf_import_keeps_text_around_xml_comments_and_instructions() {
+    for (xml_text, expected) in split_text_values() {
+        let xml = format!(r#"<xfdf xmlns="http://ns.adobe.com/xfdf/"><fields><field name="Name"><value>{xml_text}</value></field></fields></xfdf>"#);
+        let mut doc = one_field();
+        set_value(&mut doc, "Name", &FieldValue::Text("old value".into())).unwrap();
+        let report = import(&mut doc, xml.as_bytes()).unwrap();
+        assert_eq!(report.fields, 1);
+        assert!(report.rejected.is_empty(), "{report:?}");
+        let saved = write_full(&doc, &SaveOptions::default()).unwrap();
+        let reopened = Document::open(Arc::new(saved)).unwrap();
+        let want: Vec<&str> = if expected.is_empty() { vec![] } else { vec![expected] };
+        assert_eq!(values(&reopened)[0].1, want, "{xml_text}");
+    }
+}
+
+#[test]
+fn xml_form_import_preserves_text_around_comments_and_instructions() {
+    for (body, expected) in [
+        ("left<!-- ignored -->right", "leftright"),
+        ("<!-- first -->left<?note ignored?>middle<!-- last -->right", "leftmiddleright"),
+        ("<![CDATA[<left>]]><!-- ignored -->&amp;right", "<left>&right"),
+        (" left <!-- ignored --> right ", " left  right "),
+        ("<!-- empty --><?note ignored?>", ""),
+    ] {
+        let mut original = one_field();
+        let root = original.root().unwrap();
+        original.update_dict(root, |dict| dict.set(b"PCUnknown".to_vec(), PdfString::text("retained"))).unwrap();
+        set_value(&mut original, "Name", &FieldValue::Text("replace me".into())).unwrap();
+        let source = write_full(&original, &SaveOptions::default()).unwrap();
+        let mut doc = Document::open(Arc::new(source.clone())).unwrap();
+        let xml = format!("<?xml version=\"1.0\"?><fields><Name>{body}</Name></fields>");
+        let report = import(&mut doc, xml.as_bytes()).unwrap();
+        assert_eq!(report.fields, 1);
+        assert!(report.rejected.is_empty());
+        for saved in [write_full(&doc, &SaveOptions::default()).unwrap(), write_incremental(&doc, &SaveOptions::default()).unwrap()] {
+            let reopened = Document::open(Arc::new(saved)).unwrap();
+            let name = fields(&reopened).into_iter().find(|f| f.name == "Name").unwrap();
+            let want = if expected.is_empty() { Vec::new() } else { vec![expected.to_string()] };
+            assert_eq!(name.value, want, "XML body: {body}");
+            let root = reopened.get(reopened.root().unwrap());
+            assert_eq!(root.as_dict().unwrap().get(b"PCUnknown").unwrap().as_string().unwrap().to_text(), "retained");
+        }
+        assert_eq!(fields(&original).into_iter().find(|f| f.name == "Name").unwrap().value, vec!["replace me"]);
     }
 }

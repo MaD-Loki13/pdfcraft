@@ -7,7 +7,10 @@
 //!   server ([`mcp`]), `pdfcraft-cli run` and (later) the UI control channel.
 //! - Pages are **1-based** in every tool, as people number them. Rectangles are in PDF points
 //!   with the origin at the top-left of the displayed page.
-//! - An optional root directory confines every path a tool reads or writes.
+//! - An optional root directory confines every path a tool reads or writes. Separately,
+//!   [`file_access::AutomationRoots`] (`pdfcraft-cli mcp --automation-read-root` and
+//!   `--automation-write-root`) holds a read folder and a write folder, each left out meaning no
+//!   access of its kind.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -16,6 +19,7 @@ mod batch;
 mod comments;
 mod content;
 mod conventions;
+pub mod file_access;
 mod forms;
 mod links;
 #[cfg(feature = "mcp")]
@@ -33,10 +37,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pdfcraft_engine::{CombineSource, DocId, Document, Edit, Session, commands};
-use pdfcraft_platform::staging::{StagingName, create_staging, staging_suffixes};
+use pdfcraft_platform::staging::{StagingName, staging_suffixes};
 use pdfcraft_render::{PageRenderer, PageText, RenderConfig, RenderRequest, RequestKind};
 use serde_json::{Value, json};
 
+pub use pdfcraft_render::Pixels;
 pub use tools::{ToolDef, tools};
 
 /// One piece of a tool's result.
@@ -107,6 +112,8 @@ const FIND_MAX_WARNING_BYTES: usize = 1024;
 pub struct Automation {
     session: Session,
     root: Option<PathBuf>,
+    /// The read and write folders of `--automation-read-root` / `--automation-write-root`.
+    roots: Option<Arc<file_access::AutomationRoots>>,
     /// Synchronous renderers, rebuilt when a document's working bytes change.
     renderers: HashMap<DocId, (Arc<Vec<u8>>, PageRenderer)>,
     /// Extracted page text, under one memory budget across all open documents.
@@ -121,7 +128,7 @@ impl Default for Automation {
 
 impl Automation {
     pub fn new() -> Self {
-        Self { session: Session::new(), root: None, renderers: HashMap::new(), texts: TextCache::default() }
+        Self { session: Session::new(), root: None, roots: None, renderers: HashMap::new(), texts: TextCache::default() }
     }
 
     /// Confine every path the tools read or write to `root` (relative paths resolve inside it).
@@ -134,9 +141,23 @@ impl Automation {
         Ok(self)
     }
 
+    /// Confine the files the tools read to the read root and the files they write to the write
+    /// root (`None`: no confinement). Applies on top of [`with_root`](Self::with_root) when both
+    /// are set.
+    pub fn with_automation_roots(mut self, roots: Option<Arc<file_access::AutomationRoots>>) -> Self {
+        self.roots = roots;
+        self
+    }
+
     /// Use a fixed clock for saves (deterministic output in tests).
     pub fn with_clock(mut self, clock: fn() -> i64) -> Self {
         self.session = std::mem::take(&mut self.session).with_clock(clock);
+        self
+    }
+
+    /// The clock and time zone of a host without its own. See [`Session::with_wall_clock`].
+    pub fn with_wall_clock(mut self, clock: fn() -> i64, utc_offset: fn() -> i64) -> Self {
+        self.session = std::mem::take(&mut self.session).with_wall_clock(clock, utc_offset);
         self
     }
 
@@ -146,14 +167,16 @@ impl Automation {
 
     /// Save `bytes` that a caller writes on the session's behalf, such as `pdfcraft-cli run`
     /// saving a rendered page. With a root, it is confined like a tool's own output (a relative
-    /// path resolves inside it) and written atomically. Without one, the path is written as
-    /// given, so `/dev/stdout` and the like still work. Returns where the file went.
+    /// path resolves inside it). Written atomically either way (#2166), except to something
+    /// that is not a regular file, such as `/dev/stdout` or a pipe, which is written as given.
+    /// Returns where the file went.
     pub fn write_output(&self, path: &str, bytes: &[u8]) -> Result<PathBuf> {
         let target = self.resolve(path, true)?;
-        if self.root.is_some() {
-            write_atomic(&target, bytes)?;
-        } else {
+        let special = self.root.is_none() && self.roots.is_none() && std::fs::metadata(&target).is_ok_and(|m| !m.is_file() && !m.is_dir());
+        if special {
             std::fs::write(&target, bytes).map_err(|e| failed(format!("{path}: {e}")))?;
+        } else {
+            write_atomic(&target, bytes)?;
         }
         Ok(target)
     }
@@ -186,6 +209,7 @@ impl Automation {
             "page_render" => return self.page_render(&a).map(|c| vec![c]),
             "comment_image_preview" => return self.comment_image_preview(&a),
             "text_extract" => self.text_extract(&a)?,
+            "text_word_count" => self.text_word_count(&a)?,
             "text_find" => self.text_find(&a)?,
             "page_rotate" => {
                 let degrees = a.int("degrees")?;
@@ -352,7 +376,9 @@ impl Automation {
                 self.apply(&a, Edit::DuplicatePages { pages })?
             }
             "page_set_box" => self.page_set_box(&a)?,
+            "page_transition_set" => self.page_transition_set(&a)?,
             "doc_create" => self.doc_create(&a)?,
+            "xfa_to_static" => self.apply(&a, Edit::XfaToStatic)?,
             "doc_flatten" => {
                 let (comments, fields) = (a.opt_bool("comments")?.unwrap_or(true), a.opt_bool("fields")?.unwrap_or(true));
                 if !comments && !fields {
@@ -466,6 +492,15 @@ impl Automation {
                             ImageEdit::Move([u0[0].min(u1[0]) as f64, u0[1].min(u1[1]) as f64, u0[0].max(u1[0]) as f64, u0[1].max(u1[1]) as f64])
                         }
                         "rotate" => ImageEdit::Rotate(a.opt_int("quarters")?.unwrap_or(1) as i32),
+                        "crop" => {
+                            let r: Vec<f64> =
+                                a.get("rect").and_then(Value::as_array).map(|x| x.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+                            let r =
+                                <[f64; 4]>::try_from(r).map_err(|_| ToolError::InvalidArgs("crop needs rect: 4 numbers, the part to keep".into()))?;
+                            let info = &self.doc(&a)?.info.pages[page];
+                            let (u0, u1) = (info.view_to_user(r[0] as f32, r[1] as f32), info.view_to_user(r[2] as f32, r[3] as f32));
+                            ImageEdit::Crop([u0[0].min(u1[0]) as f64, u0[1].min(u1[1]) as f64, u0[0].max(u1[0]) as f64, u0[1].max(u1[1]) as f64])
+                        }
                         "flip_horizontal" => ImageEdit::Flip { horizontal: true },
                         "flip_vertical" => ImageEdit::Flip { horizontal: false },
                         "delete" => ImageEdit::Delete,
@@ -517,6 +552,12 @@ impl Automation {
                         .iter()
                         .map(|p| self.resolve(p.as_str().ok_or_else(|| ToolError::InvalidArgs("directory must be a path".into()))?, false))
                         .collect::<Result<Vec<_>>>()?
+                } else if let Some(roots) = &self.roots {
+                    // The installed fonts are outside the roots: look in the read root instead.
+                    let read = roots
+                        .read_root()
+                        .ok_or_else(|| failed("automation filesystem access is not granted: read authority is absent: installed fonts"))?;
+                    vec![self.resolve(&read.to_string_lossy(), false)?]
                 } else if let Some(root) = &self.root {
                     vec![root.clone()]
                 } else {
@@ -722,8 +763,10 @@ impl Automation {
             "comment_set_status" => self.comment_set_status(&a)?,
             "sign_list" => self.sign_list(&a)?,
             "accessibility_check" => self.a11y_check(&a)?,
+            "accessibility_find_untagged" => self.a11y_find_untagged(&a)?,
             "accessibility_autotag_preview" => self.accessibility_autotag_preview(&a)?,
             "accessibility_autotag_apply" => self.accessibility_autotag_apply(&a)?,
+            "accessibility_autotag_form_fields" => self.accessibility_autotag_form_fields(&a)?,
             "ocr_recognize" => self.ocr_recognize(&a)?,
             "js_run" => self.js_run(&a)?,
             "js_document_scripts" => self.js_document_scripts(&a)?,
@@ -754,7 +797,9 @@ impl Automation {
             "accessibility_figures" => self.accessibility_figures(&a)?,
             "accessibility_set_alt" => self.accessibility_set_alt(&a)?,
             "accessibility_tags" => self.accessibility_tags(&a)?,
+            "accessibility_tag_content" => self.accessibility_tag_content(&a)?,
             "accessibility_set_tag_property" => self.accessibility_set_tag_property(&a)?,
+            "accessibility_mark_tag_artifact" => self.accessibility_mark_tag_artifact(&a)?,
             "accessibility_move_tag" => self.accessibility_move_tag(&a)?,
             "sign_id_create" => self.sign_id_create(&a)?,
             "sign_document" => self.sign_document(&a)?,
@@ -819,7 +864,8 @@ impl Automation {
             .session
             .bookmark_page(id, offset, limit)
             .ok_or_else(|| ToolError::Failed(format!("no open document with id {} (see doc_list)", id.0)))?;
-        Ok(json!({ "bookmarks": nest_rows(&page.rows), "next": page.next, "truncated": page.truncated }))
+        let pages = &self.doc(a)?.info.pages;
+        Ok(json!({ "bookmarks": nest_rows(&page.rows, pages), "next": page.next, "truncated": page.truncated }))
     }
 
     fn doc(&self, a: &Args) -> Result<&Document> {
@@ -866,7 +912,14 @@ impl Automation {
         let id = doc.id;
         let target = match a.opt_str("path")? {
             Some(p) => self.resolve(p, true)?,
-            None => PathBuf::from(doc.path.clone().ok_or_else(|| failed("the document has never been saved: pass a path"))?),
+            None => {
+                // Saving in place writes where the file was opened from, which the read root
+                // allows and the write root may not.
+                let own = doc.path.clone().ok_or_else(|| failed("the document has never been saved: pass a path"))?;
+                let own_path = PathBuf::from(&own);
+                self.check_roots(&own, &own_path, file_access::Access::Write)?;
+                own_path
+            }
         };
         let same_file = doc.path.as_deref().is_some_and(|p| Path::new(p) == target);
         // Saving to a new file is a full rewrite unless asked otherwise, like Save As.
@@ -879,11 +932,24 @@ impl Automation {
         // A save that adds or removes encryption, or must not keep the old revision (Sanitize,
         // redaction), is rewritten in full even when an incremental save was asked for.
         let incremental = !full && bytes.starts_with(&self.doc(a)?.saved_bytes());
+        self.publish_save(id, &target, bytes, incremental, write)
+    }
+
+    /// Validate the prepared bytes before publishing them or marking the document saved.
+    fn publish_save(
+        &mut self,
+        id: DocId,
+        target: &Path,
+        bytes: Arc<Vec<u8>>,
+        incremental: bool,
+        write: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> Result<Value> {
         self.session.check_save(id, &bytes).map_err(failed)?;
-        write(&target, &bytes)?;
+        write(target, &bytes)?;
         let path = target.to_string_lossy().into_owned();
         self.session.mark_saved(id, bytes.clone(), Some(path.clone())).map_err(failed)?;
-        Ok(json!({ "path": path, "bytes": bytes.len(), "incremental": incremental, "document": summary(self.doc(a)?) }))
+        let doc = self.session.get(id).ok_or_else(|| failed("the saved document is no longer open"))?;
+        Ok(json!({ "path": path, "bytes": bytes.len(), "incremental": incremental, "document": summary(doc) }))
     }
 
     fn doc_revisions(&mut self, a: &Args) -> Result<Value> {
@@ -993,11 +1059,14 @@ impl Automation {
     }
 
     fn doc_optimize(&mut self, a: &Args) -> Result<Value> {
-        use pdfcraft_engine::optimize::{Compression, ImageSettings, Settings};
+        use pdfcraft_engine::optimize::{Compression, ImageSettings, Preset};
         let id = self.doc(a)?.id;
         let before = self.doc(a)?.bytes.len();
         let path = self.resolve(a.str("path")?, true)?;
-        let mut settings = Settings::default();
+        let mut settings = match a.opt_str("preset")? {
+            None => Preset::Standard.settings(),
+            Some(p) => Preset::from_name(p).ok_or_else(|| ToolError::InvalidArgs(format!("unknown preset {p:?} (standard, mobile)")))?.settings(),
+        };
         let images = |key: &str, base: ImageSettings| -> Result<ImageSettings> {
             let Some(v) = a.get(key) else { return Ok(base) };
             let mut s = base;
@@ -1025,6 +1094,7 @@ impl Automation {
         settings.color = images("color", settings.color)?;
         settings.gray = images("gray", settings.gray)?;
         for (key, flag) in [
+            ("merge_fragments", &mut settings.merge_fragments),
             ("discard_thumbnails", &mut settings.discard_thumbnails),
             ("discard_alternate_images", &mut settings.discard_alternate_images),
             ("discard_tags", &mut settings.discard_tags),
@@ -1057,6 +1127,8 @@ impl Automation {
             "path": path.to_string_lossy(),
             "bytes_before": before,
             "bytes_after": bytes.len(),
+            "merged_images": o.merged_images,
+            "fragments_merged": o.fragments_merged,
             "images": o.images,
             "images_resampled": o.images_resampled,
             "images_recompressed": o.images_recompressed,
@@ -1197,7 +1269,7 @@ impl Automation {
             let out = pdfcraft_engine::export::extract_images(&doc.export_source(), &pages, min).map_err(failed)?;
             let mut files = Vec::new();
             for (k, img) in out.images.iter().enumerate() {
-                let path = child(&folder, &pdfcraft_engine::export::image_file_name(&stem, img, k + 1));
+                let path = child(&folder, &pdfcraft_engine::export::image_file_name(&stem, img, k + 1, doc.info.pages.len()));
                 write_atomic(&path, &img.data)?;
                 files.push(json!({ "path": path.to_string_lossy(), "page": img.page + 1, "width": img.width, "height": img.height }));
             }
@@ -1277,6 +1349,58 @@ impl Automation {
         let name = a.opt_str("name")?.map(str::to_owned).unwrap_or(name);
         let id = self.session.open_new(name, bytes).map_err(failed)?;
         Ok(summary(self.session.get(id).ok_or_else(|| failed("the document vanished"))?))
+    }
+
+    fn page_transition_set(&mut self, a: &Args) -> Result<Value> {
+        use pdfcraft_engine::{Transition, TransitionSpec};
+        let n = self.doc(a)?.info.pages.len();
+        let pages = match a.opt_ints("pages")? {
+            Some(_) => self.pages(a, "pages")?,
+            None => (0..n).collect(),
+        };
+        let transition = match a.opt_str("style")? {
+            None | Some("none") => None,
+            Some(style) => {
+                let mut t = Transition::new(style);
+                if let Some(d) = a.opt_num("duration")? {
+                    t.duration = d as f32;
+                }
+                if let Some(dm) = a.opt_str("dimension")? {
+                    t.horizontal = match dm {
+                        "horizontal" => true,
+                        "vertical" => false,
+                        other => return Err(ToolError::InvalidArgs(format!("dimension must be horizontal or vertical, not {other:?}"))),
+                    };
+                }
+                if let Some(m) = a.opt_str("motion")? {
+                    t.inward = match m {
+                        "inward" => true,
+                        "outward" => false,
+                        other => return Err(ToolError::InvalidArgs(format!("motion must be inward or outward, not {other:?}"))),
+                    };
+                }
+                match a.get("direction") {
+                    None => {}
+                    Some(Value::String(s)) if s == "none" => t.direction = None,
+                    Some(v) => {
+                        t.direction = Some(
+                            v.as_u64()
+                                .and_then(|d| u16::try_from(d).ok())
+                                .ok_or_else(|| ToolError::InvalidArgs("direction must be 0, 90, 180, 270, 315 or \"none\"".into()))?,
+                        );
+                    }
+                }
+                if let Some(s) = a.opt_num("scale")? {
+                    t.scale = s as f32;
+                }
+                if let Some(b) = a.opt_bool("opaque")? {
+                    t.opaque = b;
+                }
+                Some(t)
+            }
+        };
+        let display = a.opt_num("display")?.map(|s| s as f32);
+        self.apply(a, Edit::SetTransition { pages, spec: TransitionSpec { transition, display } })
     }
 
     fn page_set_box(&mut self, a: &Args) -> Result<Value> {
@@ -1687,12 +1811,23 @@ impl Automation {
             return Err(ToolError::InvalidArgs(format!("dpi must be between 1 and {MAX_DPI}")));
         }
         let scale = (dpi / 72.0) as f32;
-        let out = if let Some(block) = a.opt_int("hide_text_block")? {
+        let block = a.opt_int("hide_text_block")?;
+        let added = a.opt_int("hide_added_text")?;
+        if block.is_some() && added.is_some() {
+            return Err(ToolError::InvalidArgs("choose only one of hide_text_block and hide_added_text".into()));
+        }
+        let out = if let Some(block) = block {
             let index = usize::try_from(block)
                 .ok()
                 .and_then(|n| n.checked_sub(1))
                 .ok_or_else(|| ToolError::InvalidArgs("hide_text_block must be a positive paragraph index from text_paragraphs".into()))?;
             self.doc(a)?.text_edit_preview(page, index).map_err(failed)?.render_background(scale).map_err(failed)?
+        } else if let Some(added) = added {
+            let index = usize::try_from(added)
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .ok_or_else(|| ToolError::InvalidArgs("hide_added_text must be a positive added text index from object_list".into()))?;
+            self.doc(a)?.added_text_preview(page, index).map_err(failed)?.render_background(scale).map_err(failed)?
         } else {
             self.renderer(id)?.render(RenderRequest { page, kind: RequestKind::Pixels, tile: None, scale, tag: 0, preview: false })
         };
@@ -1701,6 +1836,27 @@ impl Automation {
         }
         let data = encode_png(out.width, out.height, &out.rgba)?;
         Ok(Content::Png { data, width: out.width, height: out.height })
+    }
+
+    /// A page as RGBA pixels, without encoding a PNG. `page` is 1-based and `scale` is pixels
+    /// per point (1.0 = 72 dpi). For an embedder that paints the result straight onto a canvas:
+    /// the `page_render` tool only returns PNG, and encoding one to decode it again is wasted
+    /// work on every scroll. It uses the same renderer, and the same per-document cache, as
+    /// `page_render`.
+    pub fn render_pixels(&mut self, doc: u64, page: usize, scale: f32) -> Result<(u32, u32, pdfcraft_render::Pixels)> {
+        if !(scale.is_finite() && scale > 0.0 && scale <= (MAX_DPI / 72.0) as f32) {
+            return Err(ToolError::InvalidArgs(format!("scale must be between 0 and {}", MAX_DPI / 72.0)));
+        }
+        let id = DocId(doc);
+        let n = self.session.get(id).ok_or_else(|| failed(format!("no open document with id {doc} (see doc_list)")))?.info.pages.len();
+        if page < 1 || page > n {
+            return Err(ToolError::InvalidArgs(format!("page {page} is out of range: the document has {n} pages")));
+        }
+        let out = self.renderer(id)?.render(RenderRequest { page: page - 1, kind: RequestKind::Pixels, tile: None, scale, tag: 0, preview: false });
+        if let Some(e) = out.error {
+            return Err(failed(format!("page {page} could not be rendered: {e}")));
+        }
+        Ok((out.width, out.height, out.rgba))
     }
 
     fn page(&self, a: &Args) -> Result<usize> {
@@ -1755,6 +1911,28 @@ impl Automation {
         // The batch owns its Arcs: evicting a cache entry cannot lose a requested result. A
         // worker that fails to return a page is an explicit failure, never an empty success.
         Ok(pages.iter().map(|p| (*p, results.get(p).cloned().unwrap_or_else(|| Err("text extraction returned no result".into())))).collect())
+    }
+
+    fn text_word_count(&self, a: &Args) -> Result<Value> {
+        use pdfcraft_engine::word_count::{self, Counts, Options};
+        let doc = self.doc_to_copy(a)?;
+        let pages = match a.opt_ints("pages")? {
+            Some(_) => self.pages(a, "pages")?,
+            None => (0..doc.info.pages.len()).collect(),
+        };
+        let options = Options {
+            exclude_tables: a.opt_bool("exclude_tables")?.unwrap_or(false),
+            exclude_code: a.opt_bool("exclude_code")?.unwrap_or(false),
+            exclude_images: a.opt_bool("exclude_images")?.unwrap_or(false),
+        };
+        let report = word_count::count(doc.export_source(), &pages, options, |_| true).map_err(failed)?;
+        let counts = |c: Counts| json!({ "words": c.words, "characters": c.characters, "characters_without_spaces": c.characters_without_spaces });
+        Ok(json!({
+            "total": counts(report.total),
+            "pages": report.pages.into_iter().map(|(p, c)| json!({ "page": p + 1, "counts": counts(c) })).collect::<Vec<_>>(),
+            "pages_without_text": report.pages_without_text,
+            "unclassified_structure": report.unclassified_structure,
+        }))
     }
 
     fn text_extract(&mut self, a: &Args) -> Result<Value> {
@@ -1882,6 +2060,29 @@ impl Automation {
     /// namespace is refused without touching it, and the deepest existing ancestor (links
     /// followed) must be inside the root before anything about the rest is reported.
     fn resolve(&self, path: &str, for_write: bool) -> Result<PathBuf> {
+        let access = if for_write { file_access::Access::Write } else { file_access::Access::Read };
+        self.resolve_for(path, access, for_write)
+    }
+
+    /// [`resolve`](Self::resolve) with the kind of access named, for the places where a file that
+    /// is only read may still be missing (a path checked up front, whose absence is reported per
+    /// file later). The automation roots, if any, get the last word.
+    fn resolve_for(&self, path: &str, access: file_access::Access, may_be_missing: bool) -> Result<PathBuf> {
+        let target = self.resolve_in_root(path, may_be_missing)?;
+        self.check_roots(path, &target, access)?;
+        Ok(target)
+    }
+
+    /// Hold `target`, which `path` named, to the automation read or write root. Always passes
+    /// without roots.
+    fn check_roots(&self, path: &str, target: &Path, access: file_access::Access) -> Result<()> {
+        match &self.roots {
+            Some(roots) => roots.check_path(path, target, access).map_err(failed),
+            None => Ok(()),
+        }
+    }
+
+    fn resolve_in_root(&self, path: &str, for_write: bool) -> Result<PathBuf> {
         let p = Path::new(path);
         let Some(root) = &self.root else { return Ok(p.to_path_buf()) };
         let outside = || failed(format!("{path} is outside the allowed directory {}", root.display()));
@@ -1908,8 +2109,17 @@ impl Automation {
             return Err(outside());
         }
         if !rest.is_empty() && !for_write {
-            // Missing, below a folder inside the root: say why, as the system reports it.
-            real = joined.canonicalize().map_err(|e| failed(format!("{path}: {e}")))?;
+            // Missing, below a folder inside the root: say where it was looked for, so a path
+            // written for another working directory can be corrected (#1890), and otherwise
+            // why, as the system reports it. `joined` is under the root, so naming it reveals
+            // nothing outside.
+            real = joined.canonicalize().map_err(|e| {
+                let (looked, root) = (joined.display(), root.display());
+                match e.kind() {
+                    std::io::ErrorKind::NotFound => failed(format!("{path} not found (looked for {looked}, --root {root})")),
+                    _ => failed(format!("{path}: {e} (looked for {looked}, --root {root})")),
+                }
+            })?;
             if !real.starts_with(root) {
                 return Err(outside()); // it appeared, as a link out, since the check above
             }
@@ -2068,7 +2278,7 @@ impl Args<'_> {
 
 /// Bookmark rows in listing order as JSON: a row holds the rows that follow it on the page at the
 /// next level down in `children`, and paths and pages are 1-based.
-fn nest_rows(rows: &[pdfcraft_engine::BookmarkRow]) -> Vec<Value> {
+fn nest_rows(rows: &[pdfcraft_engine::BookmarkRow], pages: &[pdfcraft_render::PageInfo]) -> Vec<Value> {
     // The open rows, outermost first, with their depth and the children gathered so far.
     let mut open: Vec<(usize, Value, Vec<Value>)> = Vec::new();
     let mut roots = Vec::new();
@@ -2078,13 +2288,46 @@ fn nest_rows(rows: &[pdfcraft_engine::BookmarkRow]) -> Vec<Value> {
             close_row(&mut open, &mut roots);
         }
         let path: Vec<usize> = row.path.iter().map(|p| p.saturating_add(1)).collect();
-        let fields = json!({ "path": path, "title": row.title, "page": row.page.map(|p| p.saturating_add(1)), "open": row.open });
+        let mut fields = json!({ "path": path, "title": row.title, "page": row.page.map(|p| p.saturating_add(1)), "open": row.open });
+        if let Some(destination) = row.page.and_then(|p| pages.get(p)).and_then(|p| destination(&row.view, p)) {
+            fields["destination"] = destination;
+        }
         open.push((depth, fields, Vec::new()));
     }
     while !open.is_empty() {
         close_row(&mut open, &mut roots);
     }
     roots
+}
+
+/// Where on its page a bookmark or link goes, in points from the top-left of the displayed page
+/// like every `rect`: the destination type (`XYZ`, `Fit`, `FitH`, `FitV`, `FitR`) and its
+/// position, `null` where the destination leaves it unspecified (`/XYZ null null null` keeps the
+/// reader's position and zoom). `None` for a destination without a type.
+pub(crate) fn destination(view: &pdfcraft_render::DestView, page: &pdfcraft_render::PageInfo) -> Option<Value> {
+    use pdfcraft_render::DestView;
+    let points = |left: Option<f32>, top: Option<f32>| {
+        let [x, y] = page.dest_fraction(left, top, 0);
+        let round = |v: f32| f64::from((v * 100.0).round() / 100.0);
+        (x.map(|x| round(x * page.width)), y.map(|y| round(y * page.height)))
+    };
+    Some(match view {
+        DestView::Top => return None,
+        DestView::Xyz { left, top, zoom } => {
+            let (x, y) = points(*left, *top);
+            json!({ "fit": "XYZ", "left": x, "top": y, "zoom": zoom.map(f64::from) })
+        }
+        DestView::Fit => json!({ "fit": "Fit" }),
+        DestView::FitH { top } => {
+            let (x, y) = points(None, *top);
+            json!({ "fit": "FitH", "left": x, "top": y })
+        }
+        DestView::FitV { left } => {
+            let (x, y) = points(*left, None);
+            json!({ "fit": "FitV", "left": x, "top": y })
+        }
+        DestView::FitR { rect } => json!({ "fit": "FitR", "rect": comments::rect_to_view(page, *rect) }),
+    })
 }
 
 /// Closes the innermost open row: it joins the row above it as a child, or the top level.
@@ -2209,6 +2452,13 @@ fn info(d: &Document) -> Value {
             },
         })).collect::<Vec<_>>(),
         "layers": i.layers.iter().map(|l| json!({ "name": l.name, "visible": l.visible })).collect::<Vec<_>>(),
+        // Full-screen presentation settings a page carries (ISO 32000-2 §12.4.4): only pages with
+        // a `/Trans` or `/Dur` appear; `style` is null for a display time alone.
+        "transitions": i.transitions.iter().map(|t| json!({
+            "page": page1(t.page), "style": t.style.map(pdfcraft_render::TransitionStyle::name), "duration": t.duration,
+            "horizontal": t.horizontal, "inward": t.inward, "direction": t.direction, "scale": t.scale, "opaque": t.opaque,
+            "display": t.display,
+        })).collect::<Vec<_>>(),
         "attachments": i.attachments.iter().map(|a| json!({ "name": a.name, "description": a.description, "size": a.size })).collect::<Vec<_>>(),
         // `substitute` names the face standing in for a program the document does not embed, and
         // `substitution` says why. Both are null for an embedded font: nothing stands in. A null
@@ -2223,9 +2473,11 @@ fn info(d: &Document) -> Value {
     })
 }
 
-/// A user-space rectangle on 0-based `page` in displayed-page coordinates; unchanged when the
-/// page is unknown (a malformed annotation that points at no page).
-fn view_rect(i: &pdfcraft_render::DocInfo, page: usize, rect: [f32; 4]) -> [f32; 4] {
+/// A user-space rectangle on 0-based `page` in displayed-page coordinates (points from the
+/// top-left of the page as displayed, y down, after `/Rotate`), the way every tool reports
+/// rectangles; unchanged when the page is unknown (a malformed annotation that points at no page).
+/// Public so `pdfcraft-cli` reports the same rectangles as the tools.
+pub fn view_rect(i: &pdfcraft_render::DocInfo, page: usize, rect: [f32; 4]) -> [f32; 4] {
     i.pages.get(page).map_or(rect, |p| comments::rect_to_view(p, rect))
 }
 
@@ -2329,32 +2581,20 @@ fn write_atomic_synced(
     suffixes: impl IntoIterator<Item = u64>,
     sync: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
 ) -> Result<()> {
-    use std::io::Write;
     // A folder can't be replaced, and staging beside it could land outside the root: "." names
     // the root itself, whose parent isn't ours to write in.
     if path.is_dir() {
         return Err(failed(format!("{}: is a folder, not a file", path.display())));
     }
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let name = path.file_name().ok_or_else(|| failed(format!("{}: not a file path", path.display())))?;
+    path.file_name().ok_or_else(|| failed(format!("{}: not a file path", path.display())))?;
     std::fs::create_dir_all(dir).map_err(|e| failed(format!("{}: {e}", dir.display())))?;
-    let (tmp, file) =
-        create_staging(dir, &name.to_string_lossy(), StagingName::SuffixThenTag, suffixes).map_err(|e| failed(format!("{}: {e}", dir.display())))?;
-    // Closed at the end of the block, before the rename.
-    let written = {
-        let mut file = file;
-        // Surface delayed writeback failures before replacing the destination or marking
-        // a document clean. The handle is closed before rename (required on Windows).
-        file.write_all(bytes).and_then(|()| sync(&file))
-    };
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(failed(format!("{}: {e}", tmp.display())));
-    }
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        failed(format!("{}: {e}", path.display()))
-    })
+    // The writer itself is the platform crate's, shared with the desktop app and the CLI
+    // (#2166): the staging file is written, flushed (delayed writeback failures surface before
+    // the destination is replaced or a document marked clean), closed and renamed; a failure at
+    // any step removes it and leaves the destination as it was.
+    pdfcraft_platform::staging::write_atomically_with(path, bytes, StagingName::SuffixThenTag, suffixes, sync)
+        .map_err(|e| failed(format!("{}: {e}", path.display())))
 }
 
 #[cfg(test)]
@@ -2729,6 +2969,37 @@ mod tests {
             }
             std::fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[test]
+    fn invalid_save_bytes_never_reach_publication_or_mark_saved() {
+        let dir = staging_dir("invalid-save-bytes");
+        let target = dir.join("out.pdf");
+        let mut a = Automation::new().with_root(&dir).unwrap();
+        let id = search_document(&mut a, 2);
+        json(&mut a, "doc_save", json!({"doc": id.0, "path": "out.pdf"}));
+        let old = std::fs::read(&target).unwrap();
+        json(&mut a, "page_rotate", json!({"doc": id.0, "pages": [1], "degrees": 90}));
+        let before = summary(a.session.get(id).unwrap());
+        // Exercise both parse failure and a valid PDF that loses a page. This does not
+        // depend on a malformed input remaining unrepaired by future reader improvements.
+        for bytes in [b"not a PDF".to_vec(), numbered_pages(1)] {
+            let mut published = false;
+            let result = a.publish_save(id, &target, Arc::new(bytes), false, |_, _| {
+                published = true;
+                Ok(())
+            });
+            assert!(result.is_err(), "invalid output must be refused");
+            assert!(result.unwrap_err().to_string().contains("could not be reopened"));
+            assert!(!published, "validation must precede the writer");
+            assert_eq!(summary(a.session.get(id).unwrap()), before, "failed validation must preserve document state");
+            assert_eq!(std::fs::read(&target).unwrap(), old);
+            assert_eq!(listing(&dir), ["out.pdf"]);
+        }
+        json(&mut a, "doc_save", json!({"doc": id.0}));
+        assert!(!a.session.get(id).unwrap().dirty);
+        assert_ne!(std::fs::read(&target).unwrap(), old);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
